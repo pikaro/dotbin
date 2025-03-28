@@ -1,0 +1,140 @@
+#!/usr/bin/env python3.12
+
+import json
+import sys
+
+import pyperclip
+import requests
+
+food_id = sys.argv[1]
+
+resp = requests.get(f'https://fdc.nal.usda.gov/portal-data/external/{food_id}')
+
+if resp.status_code != 200:
+    sys.exit(1)
+
+data = resp.json()['foodNutrients']
+
+order = [
+    'Energy',
+    'Water',
+    'Protein',
+    'Total lipid (fat)',
+    'Carbohydrate, by difference',
+    'Fiber, total dietary',
+    'Alcohol, ethyl',
+    'Vitamin A, RAE',
+    'Retinol',
+    'Thiamin',
+    'Riboflavin',
+    'Niacin',
+    'Pantothenic acid',
+    'Vitamin B-6',
+    'Biotin',
+    'Folate, total',
+    'Vitamin B-12',
+    'Vitamin C, total ascorbic acid',
+    'Vitamin D (D2 + D3)',
+    'Vitamin E (alpha-tocopherol)',
+    'Vitamin K (phylloquinone)',
+    'Calcium, Ca',
+    'Chlorine, Cl',
+    'Potassium, K',
+    'Magnesium, Mg',
+    'Sodium, Na',
+    'Phosphorus, P',
+    'Iron, Fe',
+    'Fluoride, F',
+    'Iodine, I',
+    'Copper, Cu',
+    'Manganese, Mn',
+    'Zinc, Zn',
+    'Fatty acids, total saturated',
+    'Fatty acids, total monounsaturated',
+    'Fatty acids, total polyunsaturated',
+    'Cholesterol',
+]
+
+selection = {
+    'Energy': 'kcal',
+}
+
+conversion_factors = {
+    'g': 1000000,
+    'mg': 1000,
+    'ug': 1,
+}
+
+conversion = {
+    'Water': 'g',
+    'Protein': 'g',
+    'Total lipid (fat)': 'g',
+    'Carbohydrate, by difference': 'g',
+    'Fiber, total dietary': 'g',
+    'Alcohol, ethyl': 'g',
+    'Vitamin A, RAE': 'ug',
+    'Retinol': 'ug',
+    'Thiamin': 'ug',
+    'Riboflavin': 'ug',
+    'Niacin': 'ug',
+    'Pantothenic acid': 'ug',
+    'Vitamin B-6': 'ug',
+    'Biotin': 'ug',
+    'Folate, total': 'ug',
+    'Vitamin B-12': 'ug',
+    'Vitamin C, total ascorbic acid': 'mg',
+    'Vitamin D (D2 + D3)': 'ug',
+    'Vitamin E (alpha-tocopherol)': 'ug',
+    'Vitamin K (phylloquinone)': 'ug',
+    'Calcium, Ca': 'mg',
+    'Chlorine, Cl': 'mg',
+    'Potassium, K': 'mg',
+    'Magnesium, Mg': 'mg',
+    'Sodium, Na': 'mg',
+    'Phosphorus, P': 'mg',
+    'Iron, Fe': 'mg',
+    'Fluoride, F': 'ug',
+    'Iodine, I': 'ug',
+    'Copper, Cu': 'ug',
+    'Manganese, Mn': 'ug',
+    'Zinc, Zn': 'mg',
+    'Fatty acids, total saturated': 'g',
+    'Fatty acids, total monounsaturated': 'g',
+    'Fatty acids, total polyunsaturated': 'g',
+    'Cholesterol': 'g',
+}
+
+result = {}
+
+for nutrient in data:
+    if nutrient['type'] != 'FoodNutrient' or nutrient['nutrient']['isNutrientLabel']:
+        continue
+    name = nutrient['nutrient']['name']
+    try:
+        unit = nutrient['nutrient']['nutrientUnit']['name']
+    except KeyError:
+        continue
+    factor = (
+        1
+        if 'conversionToMicroGram' not in nutrient['nutrient']['nutrientUnit']
+        else nutrient['nutrient']['nutrientUnit']['conversionToMicroGram']
+    )
+    if name not in order or (name in selection and selection[name] != unit):
+        continue
+    if name in conversion:
+        final_unit = conversion[name]
+        reverse_factor = conversion_factors[final_unit]
+    else:
+        final_unit = 'u'
+        reverse_factor = 1
+    value = nutrient['value'] * factor / reverse_factor
+    result[name] = (value, final_unit)
+
+final = []
+
+for nutrient in order:
+    value = result[nutrient] if nutrient in result else (0, 'none')
+    print(f'{nutrient}: {value[0]}{value[1]}')
+    final += [str(value[0])]
+
+pyperclip.copy('\t'.join(final))

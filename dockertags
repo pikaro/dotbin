@@ -1,0 +1,42 @@
+#!/bin/bash
+
+set -euo pipefail
+
+ARCH=amd64
+
+if [[ "$1" != *"/"* ]]; then
+    IMAGE="library/$1"
+else
+    IMAGE="$1"
+fi
+
+PAGE=1
+PAGESIZE=1000
+while [ ! "${RET:-}" = "null" ]; do
+    echo ${RET:-}
+    echo "Getting page $PAGE" > /dev/stderr
+    RET="$(curl -s --fail -X GET "https://registry.hub.docker.com/v2/repositories/$IMAGE/tags?page=$PAGE&page_size=$PAGESIZE" | jq .results)"
+    let PAGE+=1
+done | jq -s add | jq -r '[
+    {
+        name:         "Name",
+        last_updated: "LastUpdated",
+        digest:       "Digest",
+        size:         "Size",
+        image:        "Architecture OS ImageDigest"
+    },
+    {
+        name:         "----",
+        last_updated: "-----------",
+        digest:       "------",
+        size:         "----",
+        image:        "------------ -- -----------"
+    }
+] + [[. |= sort_by(.last_updated) | .[] | select(.name | test("[0-9]\\."))] | .[-20:] | .[] |
+    {
+        name:         .name,
+        last_updated: .last_updated,
+        digest:       (.digest[7:11] + "..." + .digest[-4:]),
+        size:         (((((((.full_size // 0)/1048576) * 100) | round) / 100) | tostring) + "MiB"),
+        image:        .images | .[] | (.architecture + " " + .os + " " + (.digest[7:11] + "..." + .digest[-4:]))
+    }] | .[] | (.name + " " + .last_updated + " " + .digest + " " + .size + " " + .image)' | column -t

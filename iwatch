@@ -1,0 +1,16 @@
+#!/bin/bash
+
+clear
+
+termvisage "$1"
+# shellcheck disable=SC2162
+fswatch -0 --event Updated "$1" | while read -d '' _; do
+    while true; do
+        if file "$1" | grep -q image; then
+            break
+        fi
+        sleep 0.1
+    done
+    clear
+    termvisage "$1"
+done

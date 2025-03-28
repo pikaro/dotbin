@@ -1,0 +1,45 @@
+#!/bin/bash
+
+FAVS="${HOME}/.local/share/favs"
+
+mkdir -p "${FAVS}"
+
+case "${1:--l}" in
+    -l)
+        A_FAVS=()
+        for FAV in $(ls "${FAVS}"); do
+            TARGET=$(readlink "${FAVS}/${FAV}")
+            A_FAVS+=("${TARGET} > $(tput setaf 2)${FAV}$(tput sgr0)")
+        done
+
+        to-tree "${A_FAVS[@]}" | column -t -s '>'
+        ;;
+    -a)
+        NAME="$2"
+        TARGET="${3:-$(pwd)}"
+        if [ -e "${FAVS}/${NAME}" ]; then
+            echo "Fav already exists: ${NAME}" > /dev/stderr
+        else
+            ln -s "${TARGET}" "${FAVS}/${NAME}"
+            echo "Added ${NAME} -> ${TARGET}" > /dev/stderr
+        fi
+        ;;
+    -d)
+        NAME="$2"
+        if [ ! -L "${FAVS}/${NAME}" ]; then
+            echo "No such fav: ${NAME}" > /dev/stderr
+        else
+            TARGET=$(readlink "${FAVS}/${NAME}")
+            echo "Removed ${NAME} -> ${TARGET}" > /dev/stderr
+            rm "${FAVS}/${NAME}"
+        fi
+        ;;
+    *)
+        if [ ! -L "${FAVS}/$1" ]; then
+            echo "No such fav: $1" > /dev/stderr
+        else
+            TARGET=$(readlink "${FAVS}/$1")
+            echo "${TARGET}" > /dev/stderr
+            cd "${TARGET}"
+        fi
+esac

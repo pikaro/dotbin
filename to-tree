@@ -1,0 +1,34 @@
+#!/usr/bin/env python3.12
+
+import sys
+
+def compute_tree_structure(paths):
+    """Computes the tree structure from a list of paths."""
+    tree = {}
+    for path in paths:
+        parts = path.split('/')[1:]  # Skip the first slash
+        current = tree
+        for part in parts:
+            current = current.setdefault(part, {})
+    return tree
+
+def render_tree(tree, prefix=''):
+    """Renders the tree structure to a list of strings."""
+    if not tree:
+        return []
+    lines = []
+    for i, (node, subtree) in enumerate(tree.items(), 1):
+        connector = '┣╴' if i < len(tree) else '┗╴'
+        lines.append(f"{prefix}{connector}{node}")
+        subprefix = prefix + ('┃ ' if i < len(tree) else '  ')
+        lines.extend(render_tree(subtree, prefix=subprefix))
+    return lines
+
+def main(paths):
+    """Main function to process paths and print the tree."""
+    tree = compute_tree_structure(sorted(paths))
+    for line in render_tree(tree):
+        print(line)
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

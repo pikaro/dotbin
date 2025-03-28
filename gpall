@@ -1,0 +1,6 @@
+#!/bin/bash
+
+set -eE
+
+git push --all "${@}"
+git push --no-verify --tags "${@}"

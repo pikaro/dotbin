@@ -1,0 +1,32 @@
+#!/bin/bash
+
+if [ "$1" = "-u" ]; then UTIL="$2"; shift; shift; else UTIL="xelatex"; fi
+
+# Set the path to your .tex file
+TEX_FILE="$1"
+
+# Function to rebuild the .tex file with xelatex
+rebuild() {
+    echo "Rebuilding $TEX_FILE"
+    "$UTIL" "$TEX_FILE"
+}
+
+bye() {
+    echo "Exiting"
+    pkill -P $$
+    exit 0
+}
+trap bye INT
+
+# Initial build
+rebuild
+open -a Skim "$(echo "${TEX_FILE}" | sed 's/\.tex/.pdf/')"
+
+# Watch for changes in the .tex file
+while true; do
+    # Use fswatch to wait for changes
+    fswatch "$@" | while read -r file; do
+        # Rebuild on change
+        rebuild
+    done
+done

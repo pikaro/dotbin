@@ -1,0 +1,5 @@
+#!/bin/bash
+
+read -rs -p "Enter Password: " PASSWORD
+export PASSWORD
+openssl enc -aes-256-cbc -in "$1" -out "$1.enc" -md sha512 -pbkdf2 -iter 100000 -salt -pass env:PASSWORD

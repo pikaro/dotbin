@@ -1,0 +1,157 @@
+#!/usr/bin/env python
+
+import logging
+import re
+
+import requests
+
+logging.basicConfig(level=logging.DEBUG)
+log = logging.getLogger(__name__)
+
+from collections import OrderedDict
+from sys import argv
+
+import pyperclip
+from bs4 import BeautifulSoup
+
+headers = {'cookie': 'PHPSESSID=dummy'}
+html = requests.get(
+    f'https://www.naehrwertrechner.de/naehrwerte/{argv[1]}', headers=headers
+).content
+
+dom = BeautifulSoup(html, 'html.parser', from_encoding='utf-8')
+
+tables = dom.find_all('table')
+
+output = OrderedDict(
+    {
+        'Energie (kcal)': None,
+        'Wasser': 'g',
+        'Eiweiß': 'g',
+        'Fett': 'g',
+        'Kohlenhydrate': 'g',
+        'Ballaststoffe': 'g',
+        'Alkohol': 'g',
+        'Vitamin A Retinoläquivalent': 'ug',
+        'Retinol': 'ug',
+        'Vitamin B1 Thiamin': 'ug',
+        'Vitamin B2 Riboflavin': 'ug',
+        'Vitamin B3 Niacin, Nicotinsäure': 'ug',
+        'Vitamin B5 Pantothensäure': 'ug',
+        'Vitamin B6 Pyridoxin': 'ug',
+        'Vitamin B7 Biotin (Vitamin H)': 'ug',
+        'Vitamin B9 gesamte Folsäure': 'ug',
+        'Vitamin B12 Cobalamin': 'ug',
+        'Vitamin C Ascorbinsäure': 'mg',
+        'Vitamin D Calciferole': 'ug',
+        'Vitamin E': 'ug',
+        'Vitamin K': 'ug',
+        'Calcium': 'mg',
+        'Chlorid': 'mg',
+        'Kalium': 'mg',
+        'Magnesium': 'mg',
+        'Natrium': 'mg',
+        'Phosphor': 'mg',
+        'Eisen': 'mg',
+        'Fluorid': 'ug',
+        'Iodid': 'ug',
+        'Kupfer': 'ug',
+        'Mangan': 'ug',
+        'Zink': 'mg',
+        'Gesättigte Fettsäuren': 'g',
+        'Einfach ungesättigte Fettsäuren': 'g',
+        'Mehrfach ungesättigte Fettsäuren': 'g',
+        'Cholesterin': 'g',
+        'ALA - Linolensäure ω−3': 'mg',
+        'EPA - Eicosapentaensäure ω−3': 'mg',
+        'DHA - Docosahexaensäure ω−3': 'mg',
+        'Octadecadiensäure / Linolsäure ω−6': 'mg',
+        'Isoleucin': 'mg',
+        'Leucin': 'mg',
+        'Lysin': 'mg',
+        'Methionin': 'mg',
+        'Cystein': 'mg',
+        'Phenylalanin': 'mg',
+        'Tyrosin': 'mg',
+        'Threonin': 'mg',
+        'Tryptophan': 'mg',
+        'Valin': 'mg',
+        'Arginin': 'mg',
+        'Histidin': 'mg',
+    }
+)
+
+conversion_factors = {
+    'g': 1000000,
+    'mg': 1000,
+    'ug': 1,
+}
+
+
+def parse(measure):
+    measure = re.sub(r'\(.*\)', '', measure).replace('µ', 'u').split(' ')
+    count = float(measure[0].replace('.', '').replace(',', '.'))
+    unit = measure[1]
+    if unit not in ['g', 'mg', 'ug']:
+        log.warning(f'{measure} has no unit')
+        unit = None
+    else:
+        log.debug(f'Parsed {measure} as {count} {unit}')
+    return count, unit
+
+
+def convert(name, measure):
+    count, unit = parse(measure)
+    if unit is not None:
+        factor = float(conversion_factors[unit] / conversion_factors[output[name]])
+        count *= factor
+    log.debug(f'Converted {measure} to {count} {output[name]}')
+    return round(count, 2)
+
+
+def nutrients_from_table(table):
+    for row in table.find_all('tr'):
+        for td in row.find_all('td'):
+            small = td.find('small')
+            if small:
+                small.decompose()
+            meter = td.find('meter')
+            if meter:
+                meter.decompose()
+    rows = [[td.get_text(strip=True) for td in row.find_all('td')] for row in table.find_all('tr')]
+    rows = [row[0:2] for row in rows if row and row[0] and isinstance(row[0], str)]
+    rows = {row[0]: convert(row[0], row[1]) for row in rows if row[0] in output.keys() and row[1]}
+    return rows
+
+
+macros = tables[1]
+vitamins = tables[2]
+minerals = tables[3]
+traces = tables[4]
+amino = tables[6]
+fats = tables[8]
+others = tables[10]
+
+nutrients = {}
+
+nutrients |= nutrients_from_table(macros)
+nutrients |= nutrients_from_table(vitamins)
+nutrients |= nutrients_from_table(minerals)
+nutrients |= nutrients_from_table(traces)
+nutrients |= nutrients_from_table(amino)
+nutrients |= nutrients_from_table(fats)
+nutrients |= nutrients_from_table(others)
+
+out = []
+
+for k, v in output.items():
+    if k not in nutrients:
+        log.error(f'[!!] Missing {k}!')
+        out += ['']
+    else:
+        log.info(f'[OK] {k}: {nutrients[k]} {v}')
+        out += [str(nutrients[k])]
+
+out += [str(nutrients['Methionin'] + nutrients['Cystein'])]
+
+pyperclip.copy('\t'.join(out))
