@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+# shellcheck source=../dotinc/entrypoint.sh
+source "${HOME}/.local/include/entrypoint.sh"
+
+REPO="${GITHUB_ORG}/${1}"
+
+if gh repo view "${REPO}" >/dev/null 2>&1; then
+    _warn "Repository ${REPO} already exists."
+else
+    gh repo create \
+        --private \
+        "${REPO}"
+fi
+
+REPO_DATA=$(gh repo view --json sshUrl,url "${REPO}")
+REPO_URL=$(echo "${REPO_DATA}" | jq -r '.url')
+REPO_SSH_URL=$(echo "${REPO_DATA}" | jq -r '.sshUrl')
+
+_log "Repository HTTP URL at: ${REPO_URL}"
+
+git remote add origin "${REPO_SSH_URL}"
+
+_log "Remote added to local repository: ${REPO_SSH_URL}"
