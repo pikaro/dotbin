@@ -3,10 +3,16 @@
 # shellcheck source=../dotinc/entrypoint.sh
 source "${HOME}/.local/include/entrypoint.sh"
 
+set -eEuo pipefail
+
+if [ ! -d .git ]; then
+    yesno "Do you want to initialize a new repository?" "git init"
+fi
+
 REPO="${GITHUB_ORG}/${1}"
 
 if gh repo view "${REPO}" >/dev/null 2>&1; then
-    _warn "Repository ${REPO} already exists."
+    yesno "Repository ${REPO} already exists - add remote?"
 else
     gh repo create \
         --private \

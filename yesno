@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# Usage: yesno [prompt]
+
+# shellcheck source=../dotinc/entrypoint.sh
+source "${HOME}/.local/include/entrypoint.sh"
+
+read -p "${1:-Are you sure?} (y/N) " -n 1 -r
+echo >/dev/stderr
+
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if [ "$2" ]; then
+        _info "Executing: $2"
+        eval "$2"
+    else
+        exit 0
+    fi
+else
+    _warn "Aborted."
+    exit 1
+fi
