@@ -1,0 +1,3 @@
+#!/bin/bash
+
+nvimpager -- -u "${HOME}/.config/nvimpager/init.pager.lua" "$@"
