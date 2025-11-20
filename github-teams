@@ -1,0 +1,197 @@
+#!/bin/bash
+
+if [ "$#" -ne 1 ]; then
+    echo "Usage: $0 <github-username>"
+    exit 1
+fi
+
+TERM_DEV="$(tty)"
+TERM_WIDTH="$(tput cols <"${TERM_DEV}")"
+
+C_RED="$(tput setaf 1)"
+C_GREEN="$(tput setaf 2)"
+C_YELLOW="$(tput setaf 3)"
+C_BLUE="$(tput setaf 4)"
+C_MAGENTA="$(tput setaf 5)"
+C_CYAN="$(tput setaf 6)"
+C_DARK="$(tput setaf 7)"
+C_NONE="$(tput op)"
+C_BOLD="$(tput bold)"
+
+_decolor() {
+    echo -n "$*" | /usr/bin/sed 's/\x1B\[[0-9;]*[A-Za-z]//g'
+}
+
+MARGINL=0
+MARGINR=2
+
+_log() {
+    local LEVEL="$1"
+    local MESSAGE="$2"
+    local RJUST="${3:-}"
+    if [ -n "${RJUST}" ]; then
+        local OVERHEAD=25
+        local DECOLORED
+        DECOLORED="$(_decolor "${MESSAGE}${RJUST}${LEVEL}")"
+        local PADDING=$((TERM_WIDTH - ${#DECOLORED} - OVERHEAD - MARGINL - MARGINR))
+        if [ "${PADDING}" -gt 0 ]; then
+            MESSAGE="$(printf "%s%${PADDING}s%s" "${MESSAGE}" " " "${RJUST}")"
+        else
+            MESSAGE="${MESSAGE} ${RJUST}"
+        fi
+    fi
+    printf "%${MARGINL}s%s%${MARGINR}s\n" "" "${C_DARK}[${LEVEL}] [$(date +'%Y-%m-%d %H:%M:%S')]${C_NONE} ${MESSAGE}" "" >/dev/stderr
+}
+
+_info() {
+    _log "${C_GREEN}INFO${C_DARK}" "$@"
+}
+
+_error() {
+    _log "${C_RED}ERROR${C_DARK}" "$@"
+    exit 1
+}
+
+USERNAME="$1"
+USER_COL="${C_YELLOW}${USERNAME}${C_NONE}"
+
+ORGS="$(gh api "/user/memberships/orgs" --jq '.[] | select(.role == "admin" and .state == "active") | .organization.login')"
+
+make_query() {
+    local ORG="$1"
+    local USER="$2"
+    gh api graphql -F org="${ORG}" -F user="${USER}" -f query="$(
+        cat <<'EOT'
+query OrgUserAccess($org: String!, $user: String!, $afterRepos: String) {
+  organization(login: $org) {
+    login
+
+    teams(first: 100, userLogins: [$user]) { nodes { name slug } }
+
+    membersWithRole(first: 100) {
+      edges { role node { login } }
+      pageInfo { hasNextPage endCursor }
+    }
+
+    repositories(first: 100, after: $afterRepos) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        name
+        collaborators(first: 1, query: $user) {
+          edges {
+            permission
+            permissionSources { permission source { __typename ... on Repository { name } } }
+            node { login }
+          }
+        }
+      }
+    }
+  }
+}
+EOT
+    )"
+}
+
+parse_response() {
+    local USER="$1"
+    jq --arg user "${USER}" -c -f <(
+        cat <<'EOT'
+.data.organization |
+{
+    role: .membersWithRole.edges[] | select(.node.login == $user).role,
+    teams: [.teams.nodes[].slug],
+    repos: .repositories.nodes | map({
+                (.name): ([.collaborators.edges[]? | .permissionSources[]? | select(.source.__typename == "Repository").permission])
+            }) | map(select(.[] | length > 0)) | add
+} | to_entries[]
+EOT
+    )
+}
+
+link() {
+    local URL="$1"
+    printf "%s" "${C_BLUE}${URL}${C_NONE}"
+}
+
+object() {
+    local NAME="$1"
+    printf "%s" "${C_CYAN}${NAME}${C_NONE}"
+}
+
+perm() {
+    local PERM="$1"
+    case "${PERM}" in
+    "ADMIN") printf "%s" "${C_MAGENTA}${PERM}${C_NONE}" ;;
+    "WRITE") printf "%s" "${C_YELLOW}${PERM}${C_NONE}" ;;
+    "READ") printf "%s" "${C_GREEN}${PERM}${C_NONE}" ;;
+    "MEMBER") printf "%s" "${C_YELLOW}${PERM}${C_NONE}" ;;
+    "MAINTAIN") printf "%s" "${C_RED}${PERM}${C_NONE}" ;;
+    "TRIAGE") printf "%s" "${C_DARK}${PERM}${C_NONE}" ;;
+    *) _error "Unknown permission: ${PERM}" ;;
+    esac
+}
+
+render_org_perm() {
+    local ORG="$1"
+    local PERM="$2"
+    LINK=$(link "https://github.com/${ORG}/people")
+    ORG="$(object "${ORG}")"
+    PERM_COLORED="$(perm "${PERM}")"
+    _info "  User ${USER_COL} has ${ORG} permission: ${PERM_COLORED}" "${LINK}"
+}
+
+render_team() {
+    local ORG="$1"
+    local TEAM="$2"
+    LINK="$(link "https://github.com/orgs/${ORG}/teams/${TEAM}")"
+    TEAM="$(object "${TEAM}")"
+    _info "  User ${USER_COL} is a member of ${TEAM}" "${LINK}"
+}
+
+render_teams() {
+    local ORG="$1"
+    local TEAMS="$2"
+    for TEAM in $(echo "${TEAMS}" | jq -r '.[]'); do
+        render_team "${ORG}" "${TEAM}"
+    done
+}
+
+render_repo() {
+    local ORG="$1"
+    local REPO="$2"
+    shift
+    shift
+    LINK="$(link "https://github.com/${ORG}/${REPO}")"
+    REPO="$(object "${REPO}")"
+    PERMS_COLORED="$(for P in "${@}"; do perm "${P}"; done | paste -sd, -)"
+    _info "  User ${USER_COL} has ${PERMS_COLORED} on ${REPO}" "${LINK}"
+}
+
+render_repos() {
+    local ORG="$1"
+    local REPOS_JSON="$2"
+    for REPO in $(echo "${REPOS_JSON}" | jq -r 'keys[]'); do
+        PERMS="$(echo "${REPOS_JSON}" | jq -r --arg repo "${REPO}" '.[$repo][]')"
+        render_repo "${ORG}" "${REPO}" "${PERMS}"
+    done
+}
+
+render() {
+    local TYPE="$1"
+    local VALUE="$2"
+
+    case "${TYPE}" in
+    "teams") render_teams "${ORG}" "${VALUE}" ;;
+    "role") render_org_perm "${ORG}" "${VALUE}" ;;
+    "repos") render_repos "${ORG}" "${VALUE}" ;;
+    esac
+}
+
+for ORG in $ORGS; do
+    _info "Checking $(object "${ORG}")"
+    make_query "${ORG}" "${USERNAME}" | parse_response "${USERNAME}" | while read -r LINE; do
+        TYPE="$(echo "${LINE}" | jq -r '.key')"
+        VALUE="$(echo "${LINE}" | jq -r '.value')"
+        render "${TYPE}" "${VALUE}"
+    done
+done

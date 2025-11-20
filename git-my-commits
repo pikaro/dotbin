@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# if [[ $# -lt 3 ]]; then
+#     echo "Usage: $0 ROOT_DIR AUTHOR_PATTERN SINCE [UNTIL]" >&2
+#     echo "Example: $0 ~/code 'me@example.com' '2024-01-01' '2024-12-31'" >&2
+#     exit 1
+# fi
+
+ROOT_DIR="${1:-.}"
+AUTHOR_ME="$(git config --global user.email || echo '')"
+AUTHOR_PATTERN="${2:-$AUTHOR_ME}"
+WEEK_AGO_DATE="$(date -d '7 days ago' +%Y-%m-%d)"
+SINCE="${3:-$WEEK_AGO_DATE}"
+UNTIL="${4:-}"
+
+# temp file to aggregate commits from all repos
+TMP_FILE="$(mktemp)"
+trap 'rm -f "$TMP_FILE"' EXIT
+
+# Find all .git directories (non-nested)
+find "$ROOT_DIR" -type d -name ".git" 2>/dev/null | while read -r gitdir; do
+    repo_dir="$(dirname "$gitdir")"
+
+    # Skip if not a valid repo for some reason
+    if ! git -C "$repo_dir" rev-parse --git-dir >/dev/null 2>&1; then
+        continue
+    fi
+
+    # Build date args
+    date_args=("--since=$SINCE")
+    if [[ -n "$UNTIL" ]]; then
+        date_args+=("--until=$UNTIL")
+    fi
+
+    # Collect commits for this repo
+    git -C "$repo_dir" log --all \
+        --author="$AUTHOR_PATTERN" \
+        "${date_args[@]}" \
+        --date=iso-strict \
+        --pretty=format:'%H|'"$repo_dir"'|%ad|%an|%s' \
+        >>"$TMP_FILE" || true
+    echo "" >>"$TMP_FILE" # Add a newline for separation
+done
+
+COL_yellow='\e[33m'
+COL_red='\e[31m'
+COL_brightwhite='\e[97m'
+COL_blue='\e[34m'
+COL_cyan='\e[36m'
+COL_reset='\e[0m'
+
+sort -t'|' -k1,1 -u "$TMP_FILE" | sort -t'|' -k3,3 | while IFS='|' read -r hash repo date author_name subject; do
+    if [[ -z "$hash" ]]; then
+        continue
+    fi
+    DATE_ONLY="${date:0:10}"
+    DATE_TIME="${date:11:8}"
+    REPO_DIR_NAME="$(basename "$repo")"
+    echo -e "${COL_red}${hash:1:8}${COL_reset}\t${COL_yellow}${DATE_ONLY} ${DATE_TIME}${COL_reset}\t${COL_blue}${author_name}${COL_reset}\t[${COL_cyan}${REPO_DIR_NAME}${COL_reset}]\t${COL_brightwhite}${subject}${COL_reset}"
+done | column -s $'\t' -t

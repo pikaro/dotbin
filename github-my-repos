@@ -1,0 +1,27 @@
+#!/bin/bash
+
+QUERY="$(
+    cat <<-'EOF'
+query FetchPipelinesByUser($username: String!) {
+  user(login: $username) {
+    organizations(first: 50) {
+      nodes {
+        login
+        repositories(first: 50, ownerAffiliations: OWNER) {
+          nodes {
+            nameWithOwner
+          }
+        }
+      }
+    }
+  }
+}
+EOF
+)"
+
+gh api graphql -f query="$QUERY" -f username="$(gh api user --jq .login)" | jq -r '
+  .data.user.organizations.nodes[]
+  | .login as $org
+  | .repositories.nodes[]
+  | .nameWithOwner
+'
