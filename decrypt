@@ -1,5 +1,8 @@
 #!/bin/bash
 
-read -rs -p "Enter Password: " PASSWORD
-export PASSWORD
-openssl enc -d -aes-256-cbc -in "$1" -out "${1%.enc}" -md sha512 -pbkdf2 -iter 100000 -salt -pass env:PASSWORD
+if [ -z "${ENCRYPT_PASSWORD}" ]; then
+    read -rs -p "Enter Password: " ENCRYPT_PASSWORD
+fi
+export ENCRYPT_PASSWORD
+
+openssl enc -d -aes-256-cbc -in "$1" -out "${1%.enc}" -md sha512 -pbkdf2 -iter 100000 -salt -pass env:ENCRYPT_PASSWORD
