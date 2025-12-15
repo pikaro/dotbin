@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # shellcheck source=../dotinc/entrypoint.sh
-source "${HOME}/.local/include/entrypoint.sh"
+source "${HOME}/.local/shell-include/entrypoint.sh"
 
 set -eEuo pipefail
 

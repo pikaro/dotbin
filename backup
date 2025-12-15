@@ -1,0 +1,165 @@
+#!/bin/bash
+
+set -eEuo pipefail
+
+# shellcheck source=../dotinc/entrypoint.sh
+source "${HOME}/.local/shell-include/entrypoint.sh"
+
+ACTION="upload"
+if [ "${1:-}" = "-c" ]; then
+    shift
+    ACTION="check"
+elif [ "${1:-}" = "-d" ]; then
+    shift
+    ACTION="download"
+fi
+
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    echo "Usage: $0 <category> <what>"
+    exit 1
+fi
+
+if [ -z "${ENCRYPT_PASSWORD:-}" ]; then
+    read -rs -p "Enter Password: " ENCRYPT_PASSWORD
+    export ENCRYPT_PASSWORD
+fi
+
+CATEGORY="$1"
+WHAT="$2"
+HOST="${3:-$(hostname)}"
+
+BACKUP="$(basename "${WHAT}").tar.gz"
+BACKUP_ENC="${BACKUP}.enc"
+CONTENTS="${BACKUP}.contents.txt"
+CONTENTS_ENC="${CONTENTS}.enc"
+HASHES="${BACKUP}.sha256"
+TARGET="backups/manual/${HOST}/${CATEGORY}/"
+TARGET_BACKUP="${TARGET}${BACKUP_ENC}"
+
+_rotate() {
+    _log "Checking for existing backup at ./${TARGET_BACKUP} on remote server"
+    # shellcheck disable=SC2029
+    if ssh rsync "test -f '${TARGET_BACKUP}'" 2>/dev/null; then
+        # shellcheck disable=SC2029
+        OLD_DATE="$(ssh rsync ls -D '%Y-%m-%d-%H-%M-%S' -l "${TARGET_BACKUP}" | grep -v '^total' | awk '{print $6;}')"
+        BAKFILE="backups/rotated/${HOST}/${CATEGORY}/${BACKUP_ENC}.${OLD_DATE}.bak"
+        _log "Backup file ${TARGET_BACKUP} already exists - moving to ${BAKFILE}"
+        # shellcheck disable=SC2029
+        ssh rsync "mv '${TARGET_BACKUP}' '${BAKFILE}'"
+    fi
+}
+
+_docker_stop() {
+    if [ -f "${WHAT}/docker-compose.yml" ]; then
+        _warn "Stopping Docker containers in ${WHAT}"
+        (
+            cd "${WHAT}" || {
+                _log "Directory ${WHAT} does not exist."
+                exit 1
+            }
+            docker compose down
+        )
+    fi
+}
+
+_pack() {
+    _log "Creating backup of ${WHAT} at ${BACKUP}"
+    if [ -d "${WHAT}" ]; then
+        tar -czf "${BACKUP}" -C "$WHAT" .
+    elif [ -f "${WHAT}" ]; then
+        tar -czf "${BACKUP}" -C "$(dirname "$WHAT")" "$(basename "$WHAT")"
+    else
+        _fatal "The specified path $WHAT is not a file or directory."
+    fi
+    _log "Backup of ${WHAT} completed"
+}
+
+_encrypt() {
+    _log "Encrypting backup"
+    encrypt "${BACKUP}"
+    tar -tzf "${BACKUP}" >"${CONTENTS}"
+    encrypt "${CONTENTS}"
+    _log "Encryption completed"
+}
+
+_check() {
+    _log "Hashsums:"
+    echo >/dev/stderr
+    if [ ! -f "${HASHES}" ]; then
+        shasum -a 256 "${BACKUP}" "${CONTENTS}" "${BACKUP_ENC}" "${CONTENTS_ENC}" | tee "${HASHES}"
+    else
+        cat "${HASHES}" >/dev/stderr
+        echo >/dev/stderr
+        shasum -a 256 -c "${HASHES}"
+    fi
+    echo >/dev/stderr
+}
+
+_upload() {
+    _log "Uploading encrypted backup to remote server"
+    # shellcheck disable=SC2029
+    ssh rsync "mkdir -p '${TARGET}'"
+    rsync "${BACKUP_ENC}" "${CONTENTS_ENC}" "${HASHES}" "rsync:${TARGET}"
+}
+
+_download() {
+    _log "Downloading encrypted backup from remote server"
+    rsync "rsync:${TARGET_BACKUP}" "rsync:${TARGET}${CONTENTS_ENC}" "rsync:${TARGET}${HASHES}" .
+}
+
+_decrypt() {
+    _log "Decrypting backup files"
+    decrypt "${BACKUP_ENC}"
+    decrypt "${CONTENTS_ENC}"
+    _log "Decryption completed"
+}
+
+_cleanup_backup() {
+    _log "Removing local backup"
+    rm -f "${BACKUP}"
+}
+
+_cleanup_meta() {
+    _log "Removing local metadata files"
+    rm -f "${CONTENTS}" "${CONTENTS_ENC}" "${HASHES}"
+}
+
+_cleanup_enc() {
+    _log "Removing local backup files"
+    rm -f "${BACKUP_ENC}" "${CONTENTS_ENC}"
+}
+
+_cleanup() {
+    _cleanup_backup
+    _cleanup_meta
+    _cleanup_enc
+}
+
+case "${ACTION}" in
+upload)
+    _docker_stop
+    _pack
+    _encrypt
+    _rotate
+    _check
+    _upload
+    _cleanup
+    ;;
+check)
+    _download
+    _decrypt
+    _check
+    _cleanup
+    ;;
+download)
+    _download
+    _decrypt
+    _check
+    _cleanup_enc
+    _cleanup_meta
+    _log "Decrypted backup is available at ./${BACKUP}"
+    ;;
+*)
+    _fatal "Unknown action: ${ACTION}"
+    ;;
+esac
