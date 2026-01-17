@@ -1,0 +1,51 @@
+#!/bin/bash
+
+MAX_LAUNCH_TRIES=5
+
+_log() {
+    echo "[$(date -Iseconds)] $1" >/dev/stderr
+}
+
+TARGET="$1"
+shift
+
+if [ "$#" -eq 2 ] && [ "$1" == "--launch" ]; then
+    WORKSPACE="$2"
+fi
+
+APP="$(jq -r --arg win "$TARGET" '.[$win] // $win' ~/.config/aerospace/apps.json)"
+
+_log "Focusing application: $APP"
+
+_find_window() {
+    WINDOW="$(aerospace list-windows --all --json | jq -r --arg app "$APP" '.[] | select(.["app-name"] == $app) | .["window-id"]' | sort | head -n 1)"
+    if [ -n "${WINDOW}" ]; then
+        _log "Found window ID: $WINDOW"
+    else
+        _log "No window found for application: $APP"
+    fi
+}
+
+_find_window
+
+if [ -z "${WINDOW}" ] && [ -n "$WORKSPACE" ]; then
+    _log "Window not found, launching $APP.app on $WORKSPACE"
+    open -a "$APP.app"
+    TRIES=0
+
+    while [ -z "${WINDOW}" ] && [ $TRIES -lt $MAX_LAUNCH_TRIES ]; do
+        _log "Waiting for application to launch... (try $((TRIES + 1))/$MAX_LAUNCH_TRIES)"
+        sleep 0.25
+        _find_window
+        TRIES=$((TRIES + 1))
+    done
+
+    aerospace move-node-to-workspace --window-id "$WINDOW" "$WORKSPACE"
+elif [ -z "${WINDOW}" ]; then
+    _log "No workspace specified, exiting"
+    exit 0
+fi
+
+if [ -n "${WINDOW}" ]; then
+    aerospace focus --window-id "$WINDOW"
+fi
