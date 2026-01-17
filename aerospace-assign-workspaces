@@ -1,0 +1,14 @@
+#!/bin/bash
+
+# shellcheck source=../dotinc/entrypoint.sh
+. "${HOME}/.local/shell-include/entrypoint.sh"
+
+KNOWN_MONITORS="$(aerospace list-monitors --json | jq '[.[] | .["monitor-name"]]')"
+_log "Known monitors: ${KNOWN_MONITORS}"
+
+jq -r 'keys | .[]' "${HOME}/.config/aerospace/workspaces.json" | while read -r WORKSPACE; do
+    _log "Assigning workspace ${WORKSPACE}"
+    MONITOR="$(jq -r --arg ws "${WORKSPACE}" --argjson mons "${KNOWN_MONITORS}" '($mons - ($mons - .[$ws].monitors) + ["main"])[0]' "${HOME}/.config/aerospace/workspaces.json")"
+    _log "Found monitor ${MONITOR}"
+    aerospace move-workspace-to-monitor --workspace "${WORKSPACE}" "${MONITOR}"
+done

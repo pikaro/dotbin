@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# shellcheck source=../dotinc/entrypoint.sh
+. "${HOME}/.local/shell-include/entrypoint.sh"
+
+TARGET="$1"
+VISIBLE="$(aerospace list-workspaces --visible --monitor all)"
+FOCUSED="$(aerospace list-workspaces --focused)"
+
+if [ "${FOCUSED}" = "${TARGET}" ]; then
+    _log "Focused workspace is the target workspace (${TARGET})"
+    exit 0
+fi
+
+_safe_move() {
+    local WS="$1"
+    local FROM_MONITOR="$2"
+    local TO_MONITOR="$3"
+
+    WORKSPACE_COUNT="$(aerospace list-workspaces --monitor "${FROM_MONITOR}" | wc -l)"
+
+    if [ "${WORKSPACE_COUNT}" -le 1 ]; then
+        _log "Last workspace on monitor - creating temp"
+        aerospace focus-monitor "${FROM_MONITOR}"
+        aerospace workspace temp
+    fi
+
+    aerospace move-workspace-to-monitor --workspace "${WS}" "${TO_MONITOR}"
+    aerospace focus-monitor "${TO_MONITOR}"
+}
+
+if echo "${VISIBLE}" | grep -q "^${TARGET}$"; then
+    ASSIGNMENTS="$(aerospace list-workspaces --json --visible --monitor all --format '%{workspace} %{monitor-id}' | jq '[.[] | {key: .workspace, value: .["monitor-id"]}] | from_entries')"
+
+    THIS="$(echo "${ASSIGNMENTS}" | jq -r --arg ws "${FOCUSED}" '.[$ws]')"
+    OTHER="$(echo "${ASSIGNMENTS}" | jq -r --arg ws "${TARGET}" '.[$ws]')"
+
+    _log "Target workspace (${TARGET}) is visible on ${OTHER}"
+    _log "Swapping with focused workspace (${FOCUSED}) on ${THIS}"
+
+    _safe_move "${FOCUSED}" "${THIS}" "${OTHER}"
+    _safe_move "${TARGET}" "${OTHER}" "${THIS}"
+
+    aerospace workspace "${FOCUSED}"
+    aerospace workspace "${TARGET}"
+else
+    _log "Target workspace (${TARGET}) is not visible"
+    aerospace summon-workspace "${TARGET}"
+fi

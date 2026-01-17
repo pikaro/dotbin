@@ -1,10 +1,9 @@
 #!/bin/bash
 
-MAX_LAUNCH_TRIES=5
+# shellcheck source=../shell-include/entrypoint.sh
+. "${HOME}/.local/dotinc/entrypoint.sh"
 
-_log() {
-    echo "[$(date -Iseconds)] $1" >/dev/stderr
-}
+MAX_LAUNCH_TRIES=5
 
 TARGET="$1"
 shift
@@ -13,24 +12,25 @@ if [ "$#" -eq 2 ] && [ "$1" == "--launch" ]; then
     WORKSPACE="$2"
 fi
 
-APP="$(jq -r --arg win "$TARGET" '.[$win] // $win' ~/.config/aerospace/apps.json)"
+APPS="$(jq --arg win "$TARGET" '(.[$win] // {"apps": [$win]}).apps' ~/.config/aerospace/workspaces.json)"
 
-_log "Focusing application: $APP"
+_log "Focusing applications: $APPS"
 
 _find_window() {
-    WINDOW="$(aerospace list-windows --all --json | jq -r --arg app "$APP" '.[] | select(.["app-name"] == $app) | .["window-id"]' | sort | head -n 1)"
+    WINDOW="$(aerospace list-windows --all --json | /usr/bin/tr -cd '[:print:]' | jq -r --argjson apps "$APPS" '.[] | select(.["app-name"] | IN($apps[])) | .["window-id"]' | sort | head -n 1)"
     if [ -n "${WINDOW}" ]; then
         _log "Found window ID: $WINDOW"
     else
-        _log "No window found for application: $APP"
+        _log "No window found for applications: $APPS"
     fi
 }
 
 _find_window
 
 if [ -z "${WINDOW}" ] && [ -n "$WORKSPACE" ]; then
-    _log "Window not found, launching $APP.app on $WORKSPACE"
-    open -a "$APP.app"
+    TO_LAUNCH="$(echo "$APPS" | jq -r '.[0]')"
+    _log "Window not found, launching $TO_LAUNCH.app on $WORKSPACE"
+    osascript -e "tell application \"$TO_LAUNCH\" to activate"
     TRIES=0
 
     while [ -z "${WINDOW}" ] && [ $TRIES -lt $MAX_LAUNCH_TRIES ]; do
