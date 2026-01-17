@@ -1,5 +1,7 @@
 #!/bin/bash
 
+exec >>/tmp/aerospace.log 2>&1
+
 # shellcheck source=../dotinc/entrypoint.sh
 . "${HOME}/.local/shell-include/entrypoint.sh"
 

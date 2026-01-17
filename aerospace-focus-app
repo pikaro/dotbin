@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# shellcheck source=../shell-include/entrypoint.sh
-. "${HOME}/.local/dotinc/entrypoint.sh"
+exec >>/tmp/aerospace.log 2>&1
+
+# shellcheck source=../dotinc/entrypoint.sh
+. "${HOME}/.local/shell-include/entrypoint.sh"
 
 MAX_LAUNCH_TRIES=5
 
