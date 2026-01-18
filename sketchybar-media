@@ -1,0 +1,5 @@
+#!/bin/bash
+
+media-control stream | while read -r LINE; do
+    sketchybar --trigger media_control_update "DATA=$(echo "$LINE" | base64)"
+done
