@@ -10,8 +10,10 @@ MAX_LAUNCH_TRIES=5
 TARGET="$1"
 shift
 
-if [ "$#" -eq 2 ] && [ "$1" == "--launch" ]; then
-    WORKSPACE="$2"
+LAUNCH=0
+if [ "$1" == "--launch" ]; then
+    LAUNCH=1
+    WORKSPACE="${2:-}"
 fi
 
 APPS="$(jq --arg win "$TARGET" '(.[$win] // {"apps": [$win]}).apps' ~/.config/aerospace/workspaces.json)"
@@ -29,7 +31,7 @@ _find_window() {
 
 _find_window
 
-if [ -z "${WINDOW}" ] && [ -n "$WORKSPACE" ]; then
+if [ -z "${WINDOW}" ] && [ "${LAUNCH}" = 1 ]; then
     TO_LAUNCH="$(echo "$APPS" | jq -r '.[0]')"
     _log "Window not found, launching $TO_LAUNCH.app on $WORKSPACE"
     osascript -e "tell application \"$TO_LAUNCH\" to activate"
@@ -42,7 +44,10 @@ if [ -z "${WINDOW}" ] && [ -n "$WORKSPACE" ]; then
         TRIES=$((TRIES + 1))
     done
 
-    aerospace move-node-to-workspace --window-id "$WINDOW" "$WORKSPACE"
+    if [ -n "${WORKSPACE}" ]; then
+        _log "Moving window ID $WINDOW to workspace $WORKSPACE"
+        aerospace move-node-to-workspace --window-id "$WINDOW" "$WORKSPACE"
+    fi
 elif [ -z "${WINDOW}" ]; then
     _log "No workspace specified, exiting"
     exit 0
