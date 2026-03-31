@@ -1,12 +1,57 @@
 #!/bin/bash
 
-USERNAME="$(gh api user --jq .login)"
-ON="${1:-$(date +%Y-%m-%d)}"
+# shellcheck source=../dotinc/entrypoint.sh
+. ~/.local/shell-include/entrypoint.sh
 
-# github-my-repos
-echo secuwelt-ai/secuwelt-workload | while read -r REPO; do
+DATE_FORMAT="+%Y-%m-%dT%H:%M:%S+00:00"
+
+USERNAME="$(gh api user --jq .login)"
+FROM="${1:-1 day ago}"
+TO="${2:-now}"
+
+FROM="$(date -d "${FROM}" "${DATE_FORMAT}")"
+TO="$(date -d "${TO}" "${DATE_FORMAT}")"
+
+_log "Checking GitHub Actions runs for user ${USERNAME} from ${FROM} to ${TO}"
+
+FROM="$(urlencode "${FROM}")"
+TO="$(urlencode "${TO}")"
+
+github-my-repos | while read -r REPO; do
     echo "Checking ${REPO}" >/dev/stderr
-    gh api "repos/${REPO}/actions/runs?actor=${USERNAME}&created=>=${ON}"
+    gh api "repos/${REPO}/actions/runs?created=${FROM}..${TO}&per_page=100"
 done | jq -r '.workflow_runs[] | [.created_at, .repository.full_name, .name, .head_branch, .status, .conclusion, .html_url] | @tsv' |
-    column -t -s $'\t' |
-    sort
+    while IFS=$'\t' read -r CREATED_AT REPO_NAME WORKFLOW_NAME BRANCH STATUS CONCLUSION URL; do
+        CREATED_AT="$(_color blue "${CREATED_AT}")"
+        WORKFLOW_NAME="$(_color cyan "${WORKFLOW_NAME}")"
+
+        case "${BRANCH}" in
+        main) BRANCH_COLOR="red" ;;
+        master) BRANCH_COLOR="red" ;;
+        release/*) BRANCH_COLOR="yellow" ;;
+        dev*) BRANCH_COLOR="green" ;;
+        *) BRANCH_COLOR="cyan" ;;
+        esac
+        BRANCH="$(_color "${BRANCH_COLOR}" "${BRANCH}")"
+
+        case "${STATUS}" in
+        completed) STATUS_COLOR="green" ;;
+        in_progress) STATUS_COLOR="yellow" ;;
+        queued) STATUS_COLOR="blue" ;;
+        *) STATUS_COLOR="cyan" ;;
+        esac
+        STATUS="$(_color "${STATUS_COLOR}" "${STATUS}")"
+
+        case "${CONCLUSION}" in
+        success) CONCLUSION_COLOR="green" ;;
+        failure) CONCLUSION_COLOR="red" ;;
+        cancelled) CONCLUSION_COLOR="yellow" ;;
+        *) CONCLUSION_COLOR="cyan" ;;
+        esac
+        CONCLUSION="$(_color "${CONCLUSION_COLOR}" "${CONCLUSION}")"
+
+        URL="$(hyperlink "${URL}" "Link")"
+        URL="$(_color blue "${URL}")"
+
+        echo -e "${CREATED_AT}\t${REPO_NAME}\t${WORKFLOW_NAME}\t${BRANCH}\t${STATUS}\t${CONCLUSION}\t${URL}"
+    done | column -ts $'\t'
