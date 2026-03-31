@@ -1,4 +1,30 @@
 #!/bin/sh
 
-docker run --rm -it --entrypoint "/bin/bash" "$@" || \
-    docker run --rm -it --entrypoint "/bin/sh" "$@"
+_run() {
+    SHELL="${1}"
+    CONTAINER="${2}"
+    shift 2
+    docker run --rm -it --entrypoint "${SHELL}" "${CONTAINER}" "$@"
+}
+
+_build_with_busybox() {
+    docker buildx build -t tmp . -f- <<EOT
+FROM busybox:musl AS builder
+FROM "$1"
+USER root
+COPY --from=builder --chmod=755 /bin/busybox /busybin/busybox
+SHELL ["/busybin/busybox", "sh", "-c"]
+RUN /busybin/busybox --install -s /busybin
+ENV PATH="/busybin:${PATH}"
+EOT
+}
+
+_run_with_busybox() {
+    _build_with_busybox "$@"
+    shift
+    _run "/busybin/ash" tmp "$@"
+}
+
+_run "/bin/bash" "$@" ||
+    _run "/bin/sh" "$@" ||
+    _run_with_busybox "$@"
