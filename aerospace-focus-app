@@ -56,3 +56,5 @@ fi
 if [ -n "${WINDOW}" ]; then
     aerospace focus --window-id "$WINDOW"
 fi
+
+sketchybar --trigger forced

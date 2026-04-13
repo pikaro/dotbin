@@ -49,3 +49,5 @@ else
     _log "Target workspace (${TARGET}) is not visible"
     aerospace summon-workspace "${TARGET}"
 fi
+
+sketchybar --trigger forced
