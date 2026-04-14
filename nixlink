@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# shellcheck source=../dotinc/entrypoint.sh
+. "${HOME}/.local/shell-include/entrypoint.sh"
+
+_usage() {
+    _fatal "Usage: $0 <module>"
+}
+
+if [ "$#" -ne 1 ]; then
+    _usage
+fi
+
+MODULE="$1"
+
+SOURCE="${HOME}/src/dre/dotfiles/${MODULE}"
+NIXCONF="${HOME}/src/dre/dotfiles/nix/home/conf/common/files/dotconf.nix"
+TARGET_DIR="${HOME}/$(/usr/bin/grep "${MODULE}" "${NIXCONF}" | /usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' | cut -d '"' -f 2)"
+
+LINK_TARGET=
+if [ -L "${TARGET_DIR}" ]; then
+    LINK_TARGET="$(readlink -f "${TARGET_DIR}")"
+fi
+
+if [[ "${LINK_TARGET}" == "${SOURCE}" ]]; then
+    _info "Module '${MODULE}' is already linked locally - removing link"
+    rm "${TARGET_DIR}"
+else
+    _info "Linking module '${MODULE}' locally"
+    ln -sfn "${SOURCE}" "${TARGET_DIR}"
+fi
