@@ -17,6 +17,18 @@ SOURCE_ROOT="${HOME}/src/dre/dotfiles"
 SOURCE="${SOURCE_ROOT}/${MODULE}"
 NIXCONF="${HOME}/src/dre/dotfiles/nix/home/conf/common/files/dotconf.nix"
 
+_rmlink() {
+    local TARGET="$1"
+    (
+        cd "${TARGET}" || _fatal "Failed to change directory to '${TARGET}'"
+        if [ -n "$(git status --porcelain)" ]; then
+            _warn "Directory '${TARGET}' has uncommitted changes!"
+        fi
+    )
+    _info "Removing link for '${TARGET}'"
+    rm "${TARGET}"
+}
+
 if [ "${MODULE}" = "clean" ]; then
     _info "Cleaning all linked modules"
     while IFS= read -r line; do
@@ -26,8 +38,7 @@ if [ "${MODULE}" = "clean" ]; then
         fi
         TARGET="$(readlink -f "${HOME}/${line}")"
         if [[ "${TARGET}" == "${SOURCE_ROOT}"* ]]; then
-            _info "Removing link for '${line}'"
-            rm "${HOME}/${line}"
+            _rmlink "${TARGET}"
         else
             _info "Skipping '${line}' - link target '${TARGET}' is outside of source root"
             continue
@@ -48,8 +59,7 @@ if [ -L "${TARGET_DIR}" ]; then
 fi
 
 if [[ "${LINK_TARGET}" == "${SOURCE}" ]]; then
-    _info "Module '${MODULE}' is already linked locally - removing link"
-    rm "${TARGET_DIR}"
+    _rmlink "${TARGET_DIR}"
 else
     _info "Linking module '${MODULE}' locally"
     ln -sfn "${SOURCE}" "${TARGET_DIR}"
