@@ -13,7 +13,7 @@ fi
 
 MODULE="$1"
 
-SOURCE_ROOT="${HOME}/src/dre/dotfiles/"
+SOURCE_ROOT="${HOME}/src/dre/dotfiles"
 SOURCE="${SOURCE_ROOT}/${MODULE}"
 NIXCONF="${HOME}/src/dre/dotfiles/nix/home/conf/common/files/dotconf.nix"
 
