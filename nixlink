@@ -13,8 +13,33 @@ fi
 
 MODULE="$1"
 
-SOURCE="${HOME}/src/dre/dotfiles/${MODULE}"
+SOURCE_ROOT="${HOME}/src/dre/dotfiles/"
+SOURCE="${SOURCE_ROOT}/${MODULE}"
 NIXCONF="${HOME}/src/dre/dotfiles/nix/home/conf/common/files/dotconf.nix"
+
+if [ "${MODULE}" = "clean" ]; then
+    _info "Cleaning all linked modules"
+    while IFS= read -r line; do
+        if [ ! -L "${HOME}/${line}" ]; then
+            _warn "Skipping '${line}' - not a symlink"
+            continue
+        fi
+        TARGET="$(readlink -f "${HOME}/${line}")"
+        if [[ "${TARGET}" == "${SOURCE_ROOT}"* ]]; then
+            _info "Removing link for '${line}'"
+            rm "${HOME}/${line}"
+        else
+            _info "Skipping '${line}' - link target '${TARGET}' is outside of source root"
+            continue
+        fi
+    done < <(/usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' "${NIXCONF}" | cut -d '"' -f 2)
+    exit 0
+fi
+
+if [ ! -d "${SOURCE}" ]; then
+    _fatal "Module '${MODULE}' does not exist at '${SOURCE}'"
+fi
+
 TARGET_DIR="${HOME}/$(/usr/bin/grep "${MODULE}" "${NIXCONF}" | /usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' | cut -d '"' -f 2)"
 
 LINK_TARGET=
