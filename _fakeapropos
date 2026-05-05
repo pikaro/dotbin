@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+# See: https://github.com/plp13/qman/blob/main/doc/OS_SPECIFIC.md
+
+DB="${HOME}/.local/cache/qman/db.txt"
+
+if [ $# -eq 1 ]; then
+    if [ "X${1}" -eq "X." ]; then
+        cat "${DB}"
+        exit $?
+    else
+        grep "${1}" "${DB}"
+        exit $?
+    fi
+else
+    exit -1
+fi

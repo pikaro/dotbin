@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+
+# See: https://github.com/plp13/qman/blob/main/doc/OS_SPECIFIC.md
+
+DB="${HOME}/.local/cache/qman/db.txt"
+
+if [ $# -eq 1 ]; then
+    grep -e " ${1}[ \t\(,-].*-.*" "${DB}"
+    exit $?
+else
+    exit -1
+fi
