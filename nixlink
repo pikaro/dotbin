@@ -15,7 +15,11 @@ MODULE="$1"
 
 SOURCE_ROOT="${HOME}/src/dre/dotfiles"
 SOURCE="${SOURCE_ROOT}/${MODULE}"
-NIXCONF="${HOME}/src/dre/dotfiles/nix/home/conf/common/files/dotconf.nix"
+NIXCONFS=(
+    "${HOME}/src/dre/dotfiles/nix/home/conf/common/files/dotconf.nix"
+    "${HOME}/src/dre/dotfiles/nix/home/conf/home/files/dotconf.nix"
+    "${HOME}/src/dre/dotfiles/nix/home/conf/work/files/dotconf.nix"
+)
 
 _rmlink() {
     local TARGET="$1"
@@ -47,7 +51,7 @@ if [ "${MODULE}" = "clean" ]; then
             _info "Skipping '${line}' - link target '${TARGET}' is outside of source root"
             continue
         fi
-    done < <(/usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' "${NIXCONF}" | cut -d '"' -f 2)
+    done < <(/usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' "${NIXCONFS[@]}" | cut -d '"' -f 2)
     exit 0
 fi
 
@@ -55,7 +59,7 @@ if [ ! -d "${SOURCE}" ]; then
     _fatal "Module '${MODULE}' does not exist at '${SOURCE}'"
 fi
 
-TARGET_DIR="${HOME}/$(/usr/bin/grep "${MODULE}" "${NIXCONF}" | /usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' | cut -d '"' -f 2)"
+TARGET_DIR="${HOME}/$(/usr/bin/grep "${MODULE}" "${NIXCONFS[@]}" | /usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' | cut -d '"' -f 2)"
 
 LINK_TARGET=
 if [ -L "${TARGET_DIR}" ]; then
