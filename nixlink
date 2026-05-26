@@ -15,6 +15,7 @@ MODULE="$1"
 
 SOURCE_ROOT="${HOME}/src/dre/dotfiles"
 SOURCE="${SOURCE_ROOT}/${MODULE}"
+NIX_ROOT="/nix/"
 NIXCONFS=(
     "${HOME}/src/dre/dotfiles/nix/home/conf/common/files/dotconf.nix"
     "${HOME}/src/dre/dotfiles/nix/home/conf/home/files/dotconf.nix"
@@ -22,33 +23,51 @@ NIXCONFS=(
 )
 
 _rmlink() {
-    local TARGET="$1"
+    local LINK="$1"
+    local TARGET="$2"
     (
-        cd "${TARGET}" || _fatal "Failed to change directory to '${TARGET}'"
+        if [ ! -e "${TARGET}" ]; then
+            _warn "Skipping change check for '${TARGET}' - target does not exist"
+            return
+        fi
+        if [ ! -d "${TARGET}" ]; then
+            _info "Skipping change check for '${TARGET}' - target is not a directory"
+            return
+        fi
+        cd "${TARGET}" 2>/dev/null || {
+            _warn "Failed to change directory to '${TARGET}'"
+            return
+        }
+        if [ ! -d ".git" ]; then
+            _info "Skipping change check for '${TARGET}' - target is not a git repository"
+            return
+        fi
         if [ -n "$(git status --porcelain)" ]; then
             _warn "Directory '${TARGET}' has uncommitted changes!"
         fi
     )
-    _info "Removing link for '${TARGET}'"
-    rm "${TARGET}"
+    _info "Removing link for '${LINK}'"
+    rm "${LINK}"
 }
 
 if [ "${MODULE}" = "clean" ]; then
     _info "Cleaning all linked modules"
     while IFS= read -r line; do
-        if [ ! -e "${HOME}/${line}" ]; then
-            _info "Skipping '${line}' - target does not exist"
-            continue
-        fi
+        # WARNING: No test -e -- returns 1 for broken symlinks!
         if [ ! -L "${HOME}/${line}" ]; then
             _warn "Skipping '${line}' - not a symlink"
             continue
         fi
-        TARGET="$(readlink -f "${HOME}/${line}")"
-        if [[ "${TARGET}" == "${SOURCE_ROOT}"* ]]; then
-            _rmlink "${HOME}/${line}"
+        LINK="${HOME}/${line}"
+        TARGET="$(realpath -m -- "${LINK}")"
+        if [ -z "${TARGET}" ]; then
+            _warn "Skipping '${line}' - failed to resolve link target"
+            continue
+        fi
+        if [[ "${TARGET}" != "${NIX_ROOT}"* ]]; then
+            _rmlink "${LINK}" "${TARGET}"
         else
-            _info "Skipping '${line}' - link target '${TARGET}' is outside of source root"
+            _info "Skipping '${line}' - link target '${TARGET}' is within Nix store"
             continue
         fi
     done < <(/usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' "${NIXCONFS[@]}" | cut -d '"' -f 2)
