@@ -62,10 +62,10 @@ output = OrderedDict(
         'Einfach ungesättigte Fettsäuren': 'g',
         'Mehrfach ungesättigte Fettsäuren': 'g',
         'Cholesterin': 'g',
-        'ALA - Linolensäure ω−3': 'mg',
-        'EPA - Eicosapentaensäure ω−3': 'mg',
-        'DHA - Docosahexaensäure ω−3': 'mg',
-        'Octadecadiensäure / Linolsäure ω−6': 'mg',
+        'ALA - Linolensäure Omega 3': 'mg',
+        'EPA - Eicosapentaensäure Omega 3': 'mg',
+        'DHA - Docosahexaensäure Omega 3': 'mg',
+        'Octadecadiensäure / Linolsäure Omega 6': 'mg',
         'Isoleucin': 'mg',
         'Leucin': 'mg',
         'Lysin': 'mg',
@@ -89,7 +89,7 @@ conversion_factors = {
 
 
 def parse(measure):
-    measure = re.sub(r'\(.*\)', '', measure).replace('µ', 'u').split(' ')
+    measure = [v for v in re.sub(r'\(.*\)', '', measure).replace('µ', 'u').split(' ') if v]
     count = float(measure[0].replace('.', '').replace(',', '.'))
     unit = measure[1]
     if unit not in ['g', 'mg', 'ug']:
