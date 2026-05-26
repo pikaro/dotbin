@@ -1,0 +1,10 @@
+#!/bin/bash
+
+ARGS=()
+
+while read -r arg; do
+    ARGS+=("$arg")
+done < <(jq -r '. as $root | keys[] | ((. as $key | $root[$key][] | "--allow-tool=\($key)(\(.))"))' "${HOME}/.copilot-tools.json")
+
+echo "${ARGS[*]}"
+exec /opt/homebrew/bin/copilot "${ARGS[@]}" "$@"
