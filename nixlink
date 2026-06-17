@@ -47,6 +47,10 @@ _rmlink() {
         fi
     )
     _info "Removing link for '${LINK}'"
+    if [ "${DRY_RUN}" = "true" ]; then
+        _info "Dry run enabled - skipping actual removal"
+        return
+    fi
     rm "${LINK}"
 }
 
