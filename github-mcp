@@ -3,28 +3,63 @@ set -euo pipefail
 
 SERVICE="codex-github-mcp"
 ACCOUNT="github-token"
+HOST="127.0.0.1"
 PORT="8765"
+MCP_URL="http://${HOST}:${PORT}/mcp"
+LOG_DIR="$HOME/Library/Logs"
+OUT_LOG="$LOG_DIR/github-mcp.out.log"
+ERR_LOG="$LOG_DIR/github-mcp.err.log"
+
+mkdir -p "$LOG_DIR"
+
+is_running() {
+    # Prefer checking the actual HTTP endpoint.
+    # 400/405/etc still means a server exists; connection failure means no server.
+    curl -fsS --max-time 1 "$MCP_URL" >/dev/null 2>&1 && return 0
+
+    # Some MCP endpoints intentionally reject bare GETs.
+    # In that case, treat any HTTP response as alive.
+    local code
+    code="$(
+        curl -sS -o /dev/null -w '%{http_code}' --max-time 1 "$MCP_URL" 2>/dev/null || true
+    )"
+
+    [[ "$code" =~ ^[2345][0-9][0-9]$ ]]
+}
+
+if is_running; then
+    echo "github-mcp already running at $MCP_URL"
+    exit 0
+fi
 
 TOKEN="$(
-  security find-generic-password \
-    -a "$ACCOUNT" \
-    -s "$SERVICE" \
-    -w
+    security find-generic-password \
+        -a "$ACCOUNT" \
+        -s "$SERVICE" \
+        -w
 )"
 
 export GITHUB_PERSONAL_ACCESS_TOKEN="$TOKEN"
 export GITHUB_READ_ONLY="1"
 export GITHUB_TOOLS="get_file_contents,search_code"
 
-exec mcp-proxy \
-  --port="$PORT" \
-  --host="127.0.0.1" \
-  --env GITHUB_PERSONAL_ACCESS_TOKEN "$GITHUB_PERSONAL_ACCESS_TOKEN" \
-  --env GITHUB_READ_ONLY "$GITHUB_READ_ONLY" \
-  --env GITHUB_TOOLS "$GITHUB_TOOLS" \
-  -- docker run -i --rm \
+echo "starting github-mcp at $MCP_URL"
+
+nohup mcp-proxy \
+    --host "$HOST" \
+    --port "$PORT" \
+    --env GITHUB_PERSONAL_ACCESS_TOKEN "$GITHUB_PERSONAL_ACCESS_TOKEN" \
+    --env GITHUB_READ_ONLY "$GITHUB_READ_ONLY" \
+    --env GITHUB_TOOLS "$GITHUB_TOOLS" \
+    -- docker run -i --rm \
     -e GITHUB_PERSONAL_ACCESS_TOKEN \
     -e GITHUB_READ_ONLY \
     -e GITHUB_TOOLS \
-    ghcr.io/github/github-mcp-server
+    ghcr.io/github/github-mcp-server \
+    >"$OUT_LOG" \
+    2>"$ERR_LOG" \
+    &
 
+echo "github-mcp started; logs:"
+echo "  $OUT_LOG"
+echo "  $ERR_LOG"
