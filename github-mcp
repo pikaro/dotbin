@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SERVICE="codex-github-mcp"
+ACCOUNT="github-token"
+PORT="8765"
+
+TOKEN="$(
+  security find-generic-password \
+    -a "$ACCOUNT" \
+    -s "$SERVICE" \
+    -w
+)"
+
+export GITHUB_PERSONAL_ACCESS_TOKEN="$TOKEN"
+export GITHUB_READ_ONLY="1"
+export GITHUB_TOOLS="get_file_contents,search_code"
+
+exec mcp-proxy \
+  --port="$PORT" \
+  --host="127.0.0.1" \
+  --env GITHUB_PERSONAL_ACCESS_TOKEN "$GITHUB_PERSONAL_ACCESS_TOKEN" \
+  --env GITHUB_READ_ONLY "$GITHUB_READ_ONLY" \
+  --env GITHUB_TOOLS "$GITHUB_TOOLS" \
+  -- docker run -i --rm \
+    -e GITHUB_PERSONAL_ACCESS_TOKEN \
+    -e GITHUB_READ_ONLY \
+    -e GITHUB_TOOLS \
+    ghcr.io/github/github-mcp-server
+
