@@ -74,7 +74,11 @@ if [ "${MODULE}" = "clean" ]; then
             _info "Skipping '${line}' - link target '${TARGET}' is within Nix store"
             continue
         fi
-    done < <(/usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' "${NIXCONFS[@]}" | cut -d '"' -f 2)
+    done < <(
+        /usr/bin/grep -E '\.source[[:space:]]*=[[:space:]]*"\$\{inputs\.[a-zA-Z0-9_-]+\}(/[^"]*)?";' "${NIXCONFS[@]}" |
+            /usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' |
+            cut -d '"' -f 2
+    )
     exit 0
 fi
 
@@ -82,7 +86,8 @@ if [ ! -d "${SOURCE}" ]; then
     _fatal "Module '${MODULE}' does not exist at '${SOURCE}'"
 fi
 
-TARGET_DIR="${HOME}/$(/usr/bin/grep "${MODULE}" "${NIXCONFS[@]}" | /usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' | cut -d '"' -f 2)"
+TARGET_SOURCE_EXPR="\"\${inputs.${MODULE}}\""
+TARGET_DIR="${HOME}/$(/usr/bin/grep -F "${TARGET_SOURCE_EXPR}" "${NIXCONFS[@]}" | /usr/bin/grep -oE '"[a-zA-Z0-9./_-]+"\.source' | cut -d '"' -f 2)"
 
 LINK_TARGET=
 if [ -L "${TARGET_DIR}" ]; then
