@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# shellcheck source=../dotinc/entrypoint.sh
+. "${HOME}/.local/shell-include/entrypoint.sh"
+
+SECRET="$1"
+KEY="$2"
+
+if [ -z "$SECRET" ] || [ -z "$KEY" ]; then
+    _fatal "Usage: $0 <secret> <key>"
+fi
+
+vault kv get -field="$KEY" "kv/${SECRET}" 2>/dev/null || _fatal "Failed to retrieve secret '${SECRET}' with key '${KEY}'"
