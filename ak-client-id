@@ -1,0 +1,34 @@
+#!/bin/bash
+
+PROVIDER_KIND="$1"
+PROVIDER_NAME="$2"
+if [ -z "$PROVIDER_NAME" ]; then
+    echo "Usage: $0 <provider_kind> <provider_name>" >&2
+    exit 1
+fi
+
+CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/ak-client-id/client-ids.json"
+CACHE_DIR="$(dirname "$CACHE_FILE")"
+
+if [ ! -f "$CACHE_FILE" ]; then
+    mkdir -p "$CACHE_DIR"
+    echo "{}" >"$CACHE_FILE"
+fi
+
+read -r CLIENT_ID < <(jq -r --arg provider_name "$PROVIDER_NAME" '.[$provider_name] // empty' "$CACHE_FILE")
+
+if [ -n "$CLIENT_ID" ]; then
+    echo "$CLIENT_ID"
+    exit 0
+fi
+
+CLIENT_ID="$(ak api providers "${PROVIDER_KIND}" list -j --name-iexact "$PROVIDER_NAME" | jq -r '.results[0].client_id // empty')"
+
+if [ -n "$CLIENT_ID" ]; then
+    jq --arg provider_name "$PROVIDER_NAME" --arg client_id "$CLIENT_ID" '.[$provider_name] = $client_id' "$CACHE_FILE" >"${CACHE_FILE}.tmp" && mv "${CACHE_FILE}.tmp" "$CACHE_FILE"
+    echo "$CLIENT_ID"
+    exit 0
+else
+    echo "Error: Client ID not found for provider '$PROVIDER_NAME'" >&2
+    exit 1
+fi

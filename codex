@@ -1,0 +1,8 @@
+#!/bin/bash
+
+GITHUB_MCP_AUTH_TOKEN="$(ak-auth-provider proxy 'GitHub MCP')"
+SPOTIFY_MCP_AUTH_TOKEN="$(ak-auth-provider proxy 'Spotify MCP')"
+
+export GITHUB_MCP_AUTH_TOKEN SPOTIFY_MCP_AUTH_TOKEN
+
+/opt/homebrew/bin/codex "$@"
