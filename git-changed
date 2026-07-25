@@ -6,175 +6,181 @@ import argparse
 import logging
 import re
 import subprocess
+import yaml
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from functools import cached_property
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from shutil import which
 from typing import Any, Literal, Protocol
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
 )
 log = logging.getLogger(__name__)
 
-IGNOREFILE = ".git-changed-ignore"
+IGNOREFILE = '.git-changed-ignore.yml'
 
-parser = argparse.ArgumentParser(
-    description="Find changed git repositories in a directory."
-)
+parser = argparse.ArgumentParser(description='Find changed git repositories in a directory.')
 
 _ = parser.add_argument(
-    "--root",
+    '--root',
     type=Path,
     default=Path(),
-    help="Root directory to search for git repositories.",
+    help='Root directory to search for git repositories.',
 )
 
 _ = parser.add_argument(
-    "--hide-empty",
+    '--hide-empty',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Hide repositories that have no changes.",
+    help='Hide repositories that have no changes.',
 )
 
 _ = parser.add_argument(
-    "--all",
+    '--all',
     action=argparse.BooleanOptionalAction,
     default=False,
-    help="Perform all checks on all repositories.",
+    help='Perform all checks on all repositories.',
 )
 
 _ = parser.add_argument(
-    "--repo-name",
+    '--repo-name',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Show the name of the repository.",
+    help='Show the name of the repository.',
 )
 
 _ = parser.add_argument(
-    "--changed",
+    '--changed',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Show whether repos have changed.",
+    help='Show whether repos have changed.',
 )
 
 _ = parser.add_argument(
-    "--staged",
+    '--staged',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Show whether repos have staged changes.",
+    help='Show whether repos have staged changes.',
 )
 
 _ = parser.add_argument(
-    "--stashed",
+    '--stashed',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Show whether repos have stashed changes.",
+    help='Show whether repos have stashed changes.',
 )
 
 _ = parser.add_argument(
-    "--untracked",
+    '--untracked',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Show whether repos have untracked files.",
+    help='Show whether repos have untracked files.',
 )
 
 _ = parser.add_argument(
-    "--unpushed",
+    '--unpushed',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Show whether repos have unpushed commits.",
+    help='Show whether repos have unpushed commits.',
 )
 
 _ = parser.add_argument(
-    "--unmerged",
+    '--unmerged',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Show whether repos have unmerged changes on base vs head branch.",
+    help='Show whether repos have unmerged changes on base vs head branch.',
 )
 
 _ = parser.add_argument(
-    "--detached",
+    '--detached',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Show whether repos are in a detached HEAD state.",
+    help='Show whether repos are in a detached HEAD state.',
 )
 
 _ = parser.add_argument(
-    "--abnormal",
+    '--abnormal',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Show whether repos are in an abnormal state (e.g. in conflict resolution).",
+    help='Show whether repos are in an abnormal state (e.g. in conflict resolution).',
 )
 
 _ = parser.add_argument(
-    "--merged-base-branch",
+    '--merged-base-branch',
     type=str,
-    default="main",
-    help="The branch to compare against for unmerged changes (default: main).",
+    default='main',
+    help='The branch to compare against for unmerged changes (default: main).',
 )
 
 _ = parser.add_argument(
-    "--merged-head-branch",
+    '--merged-head-branch',
     type=str,
-    default="dev",
-    help="The branch to compare against for unmerged changes (default: dev).",
+    default='dev',
+    help='The branch to compare against for unmerged changes (default: dev).',
 )
 
 _ = parser.add_argument(
-    "--pre-commit",
+    '--pre-commit',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Show whether repos have pre-commit hooks configured.",
+    help='Show whether repos have pre-commit hooks configured.',
 )
 
 _ = parser.add_argument(
-    "--remote-changed",
+    '--remote-changed',
     action=argparse.BooleanOptionalAction,
     default=False,
-    help="Show whether repos have changes on the remote.",
+    help='Show whether repos have changes on the remote.',
 )
 
 _ = parser.add_argument(
-    "--skip-dirs",
-    action="append",
-    nargs="*",
-    default=[".venv", "__pycache__", "node_modules", ".git", ".idea", ".terraform"],
-    help="Directories to skip when searching for git repositories.",
+    '--skip-dirs',
+    action='append',
+    nargs='*',
+    default=['.venv', '__pycache__', 'node_modules', '.git', '.idea', '.terraform'],
+    help='Directories to skip when searching for git repositories.',
 )
 
 _ = parser.add_argument(
-    "--color",
+    '--color',
     action=argparse.BooleanOptionalAction,
     default=True,
-    help="Enable colored output.",
+    help='Enable colored output.',
 )
 
 _ = parser.add_argument(
-    "--tablefmt",
+    '--tablefmt',
     type=str,
-    default="simple_outline",
+    default='simple_outline',
     help=(
-        "Format of the output table (default: simple_outline). "
-        "NOTE: Only simple_outline is supported without tabulate package."
+        'Format of the output table (default: simple_outline). '
+        'NOTE: Only simple_outline is supported without tabulate package.'
     ),
 )
 
 _ = parser.add_argument(
-    "--ignore",
-    action="store_false",
+    '--ignore',
+    action='store_false',
     default=True,
-    help="Ignore findings listed in the .git-changed-ignore file.",
+    help='Ignore findings listed in the .git-changed-ignore file.',
 )
 
 _ = parser.add_argument(
-    "--debug",
-    action="store_true",
+    '-i',
+    '--ignore-files',
+    action='append',
+    help='Ignore files listed in the .git-changed-ignore file.',
+)
+
+_ = parser.add_argument(
+    '--debug',
+    action='store_true',
     default=False,
-    help="Enable verbose output.",
+    help='Enable verbose output.',
 )
 
 args = parser.parse_args()
@@ -182,7 +188,7 @@ args = parser.parse_args()
 if args.debug:
     logging.getLogger().setLevel(logging.DEBUG)
     log.setLevel(logging.DEBUG)
-log.debug("Debug mode enabled")
+log.debug('Debug mode enabled')
 
 
 def util(name: str) -> str:
@@ -194,7 +200,7 @@ def util(name: str) -> str:
     return path
 
 
-GIT = util("git")
+GIT = util('git')
 
 
 def run_git(*args: str, cwd: Path) -> str:
@@ -211,15 +217,13 @@ def run_git(*args: str, cwd: Path) -> str:
 
 def find_repos(root: Path) -> Iterator[Path]:
     """Find all git repositories under the given root directory."""
-    log.debug(
-        f"Searching for git repositories in {root}, skipping directories: {args.skip_dirs}"
-    )
-    for path in root.rglob(".git"):
+    log.debug(f'Searching for git repositories in {root}, skipping directories: {args.skip_dirs}')
+    for path in root.rglob('.git'):
         repo_path = path.parent
         if any(part in args.skip_dirs for part in repo_path.parts):
-            log.debug(f"Skipping {repo_path} due to skip_dirs.")
+            log.debug(f'Skipping {repo_path} due to skip_dirs.')
             continue
-        if (repo_path / ".git").is_dir():
+        if (repo_path / '.git').is_dir():
             yield repo_path
 
 
@@ -237,16 +241,16 @@ def check(what: str) -> bool:
     return getattr(args, what, False)
 
 
-Color = Literal["red", "green", "yellow", "blue", "magenta", "cyan", "white", "reset"]
+Color = Literal['red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white', 'reset']
 COLORS: dict[Color, str] = {
-    "red": "\033[91m",
-    "green": "\033[92m",
-    "yellow": "\033[93m",
-    "blue": "\033[94m",
-    "magenta": "\033[95m",
-    "cyan": "\033[96m",
-    "white": "\033[97m",
-    "reset": "\033[0m",
+    'red': '\033[91m',
+    'green': '\033[92m',
+    'yellow': '\033[93m',
+    'blue': '\033[94m',
+    'magenta': '\033[95m',
+    'cyan': '\033[96m',
+    'white': '\033[97m',
+    'reset': '\033[0m',
 }
 
 
@@ -257,7 +261,7 @@ def colorize(what: str, color: Color) -> str:
     if color not in COLORS:
         _err = f"Color '{color}' is not defined"
         raise ValueError(_err)
-    return f"{COLORS[color]}{what}{COLORS['reset']}"
+    return f'{COLORS[color]}{what}{COLORS["reset"]}'
 
 
 class ResultError(Exception):
@@ -270,7 +274,7 @@ class ResultError(Exception):
 
     def __str__(self) -> str:
         """Return a string representation of the error."""
-        return colorize(f"Error: {self.message}", "red")
+        return colorize(f'Error: {self.message}', 'red')
 
 
 StatusResult = ResultError | str | list[str] | bool
@@ -278,8 +282,6 @@ StatusResult = ResultError | str | list[str] | bool
 
 @dataclass
 class IgnoreFile:
-    """TypedDict to represent an ignore entry."""
-
     changed: bool = False
     staged: bool = False
     stashed: bool = False
@@ -293,22 +295,38 @@ class IgnoreFile:
 
 
 def load_ignore_file(path: Path) -> IgnoreFile:
-    """Load the ignore file and return its contents as an IgnoreFile."""
+    """Load and validate the YAML ignore file."""
     ignore_path = path / IGNOREFILE
-    ignore_data = IgnoreFile()
-    if not ignore_path.is_file():
-        return ignore_data
 
-    log.debug(f"Loading ignore file from {ignore_path}")
-    with ignore_path.open("r") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("#") or not line:
-                continue
-            if line in ignore_data.__dataclass_fields__:
-                setattr(ignore_data, line, True)
-                log.debug(f"Ignoring {line} as per {ignore_path}")
-    return ignore_data
+    if not ignore_path.is_file():
+        return IgnoreFile()
+
+    log.debug('Loading ignore file from %s', ignore_path)
+
+    with ignore_path.open(encoding='utf-8') as file:
+        raw_data: Any = yaml.safe_load(file)
+
+    if raw_data is None:
+        return IgnoreFile()
+
+    if not isinstance(raw_data, dict):
+        raise ValueError(
+            f'{ignore_path} must contain a YAML mapping, not {type(raw_data).__name__}'
+        )
+
+    valid_fields = {item.name for item in fields(IgnoreFile)}
+    unknown_fields = raw_data.keys() - valid_fields
+    if unknown_fields:
+        unknown = ', '.join(sorted(unknown_fields))
+        raise ValueError(f'Unknown fields in {ignore_path}: {unknown}')
+
+    boolean_fields = valid_fields
+    for name in boolean_fields:
+        value = raw_data.get(name, False)
+        if not isinstance(value, bool):
+            raise ValueError(f'{name!r} in {ignore_path} must be a boolean')
+
+    return IgnoreFile(**raw_data)
 
 
 @dataclass
@@ -335,13 +353,13 @@ class GitRepoStatus:
 
 
 ABNORMAL_STATES = {
-    ".U": "Unmerged",
-    "U.": "Unmerged",
-    "DU": "Conflict",
-    "UD": "Conflict",
-    "DD": "Conflict",
-    "UU": "Unmerged",
-    "AA": "Conflict",
+    '.U': 'Unmerged',
+    'U.': 'Unmerged',
+    'DU': 'Conflict',
+    'UD': 'Conflict',
+    'DD': 'Conflict',
+    'UU': 'Unmerged',
+    'AA': 'Conflict',
 }
 
 
@@ -364,64 +382,101 @@ class GitRepo:
         """Return the name of the repository."""
         return self.path.name
 
+    def _is_ignored_file(self, filename: str) -> bool:
+        """Return whether a repository-relative filename matches an ignored pattern."""
+        path = PurePosixPath(filename)
+
+        return any(path.match(pattern) for pattern in args.ignore_files)
+
+    def _has_ignored_file(self, zero_delimited_results: str) -> bool:
+        entries = zero_delimited_results.split('\0')
+        index = 0
+
+        while index < len(entries):
+            entry = entries[index]
+            index += 1
+
+            if not entry:
+                continue
+
+            status, filename = entry.strip().split(' ', maxsplit=2)
+
+            # In porcelain v1 -z output, renames and copies include the
+            # destination path first, followed by the source path.
+            filenames = [filename]
+            if 'R' in status or 'C' in status:
+                if index < len(entries) and entries[index]:
+                    filenames.append(entries[index])
+                    index += 1
+
+            if not all(self._is_ignored_file(name) for name in filenames):
+                return True
+
+        return False
+
     @cached_property
     def changed(self) -> StatusResult:
-        """Check if the repository has uncommitted changes."""
+        """Check whether the repository has non-ignored uncommitted changes."""
         try:
-            output = run_git("status", "--porcelain", cwd=self.path)
-            log.debug(f"Changed status in {self.path}: {output}")
-            return bool(output)
+            output = run_git('status', '--porcelain=v1', '-z', cwd=self.path)
+            log.debug('Changed status in %s: %r', self.path, output)
+
+            if not args.ignore_files:
+                return bool(output)
+            return self._has_ignored_file(output)
+
         except subprocess.CalledProcessError:
-            log.warning(f"Failed to check status of repository at {self.path}")
-            return ResultError("git")
+            log.warning(
+                'Failed to check status of repository at %s',
+                self.path,
+            )
+            return ResultError('git')
 
     @cached_property
     def staged(self) -> StatusResult:
         """Check if the repository has staged changes."""
         try:
-            output = run_git("diff", "--cached", "--name-only", cwd=self.path)
-            log.debug(f"Staged changes in {self.path}: {output}")
+            output = run_git('diff', '--cached', '--name-only', cwd=self.path)
+            log.debug(f'Staged changes in {self.path}: {output}')
             return bool(output)
         except subprocess.CalledProcessError:
-            log.warning(f"Failed to check staged changes in repository at {self.path}")
-            return ResultError("git")
+            log.warning(f'Failed to check staged changes in repository at {self.path}')
+            return ResultError('git')
 
     @cached_property
     def stashed(self) -> StatusResult:
         """Check if the repository has stashed changes."""
         try:
-            output = run_git("stash", "list", cwd=self.path)
-            log.debug(f"Stashed changes in {self.path}: {output}")
+            output = run_git('stash', 'list', cwd=self.path)
+            log.debug(f'Stashed changes in {self.path}: {output}')
             return bool(output)
         except subprocess.CalledProcessError:
-            log.warning(f"Failed to check stashed changes in repository at {self.path}")
-            return ResultError("git")
+            log.warning(f'Failed to check stashed changes in repository at {self.path}')
+            return ResultError('git')
 
     @cached_property
     def detached(self) -> StatusResult:
         """Check if the repository is in a detached HEAD state."""
         try:
-            output = run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=self.path)
-            log.debug(f"Detached HEAD status in {self.path}: {output}")
+            output = run_git('rev-parse', '--abbrev-ref', 'HEAD', cwd=self.path)
+            log.debug(f'Detached HEAD status in {self.path}: {output}')
         except subprocess.CalledProcessError:
-            log.warning(
-                f"Failed to check detached HEAD status in repository at {self.path}"
-            )
-            return ResultError("git")
-        return output == "HEAD"
+            log.warning(f'Failed to check detached HEAD status in repository at {self.path}')
+            return ResultError('git')
+        return output == 'HEAD'
 
     @cached_property
     def abnormal(self) -> StatusResult:
         """Check if the repository is in an abnormal state (e.g. in conflict resolution)."""
         try:
-            output = run_git("status", "--porcelain", cwd=self.path)
-            log.debug(f"Abnormal status in {self.path}: {output}")
+            output = run_git('status', '--porcelain', cwd=self.path)
+            log.debug(f'Abnormal status in {self.path}: {output}')
         except subprocess.CalledProcessError:
-            log.warning(f"Failed to check abnormal status in repository at {self.path}")
-            return ResultError("git")
+            log.warning(f'Failed to check abnormal status in repository at {self.path}')
+            return ResultError('git')
         for line in output.splitlines():
             if line[:2] in ABNORMAL_STATES:
-                log.debug(f"Abnormal state detected in {self.path}: {line.strip()}")
+                log.debug(f'Abnormal state detected in {self.path}: {line.strip()}')
                 return ABNORMAL_STATES[line[:2]]
         return False
 
@@ -429,126 +484,117 @@ class GitRepo:
     def untracked(self) -> StatusResult:
         """Check if the repository has untracked files."""
         try:
-            output = run_git(
-                "ls-files", "--others", "--exclude-standard", cwd=self.path
-            )
-            log.debug(f"Untracked files in {self.path}: {output}")
-            return bool(output)
+            output = run_git('status', '--porcelain=v1', '-z', cwd=self.path)
+            log.debug(f'Untracked files in {self.path}: {output}')
+
+            if not args.ignore_files:
+                return bool(output)
+            return self._has_ignored_file(output)
         except subprocess.CalledProcessError:
-            log.warning(f"Failed to check untracked files in repository at {self.path}")
-            return ResultError("git")
+            log.warning(f'Failed to check untracked files in repository at {self.path}')
+            return ResultError('git')
 
     @cached_property
     def unpushed(self) -> StatusResult:
         """Check if the repository has unpushed commits."""
         if not self._has_remote():
-            log.error(f"Repository at {self.path} has no remote configured.")
-            return ResultError("remote")
+            log.error(f'Repository at {self.path} has no remote configured.')
+            return ResultError('remote')
         if not_tracking := self._not_tracking:
-            log.error(f"Not all branches in {self.path} are tracking remote branches.")
-            return ResultError(",".join(not_tracking))
+            log.error(f'Not all branches in {self.path} are tracking remote branches.')
+            return ResultError(','.join(not_tracking))
 
         unpushed: set[str] = set()
         for branch in self._all_branches():
             try:
                 output = run_git(
-                    "rev-list",
-                    "--left-right",
-                    f"{branch}...{branch}@{{upstream}}",
+                    'rev-list',
+                    '--left-right',
+                    f'{branch}...{branch}@{{upstream}}',
                     cwd=self.path,
                 )
                 if output:
                     unpushed.add(branch)
             except subprocess.CalledProcessError:
-                log.warning(
-                    f"Failed to check unpushed commits for branch {branch} in {self.path}"
-                )
-                return ResultError("git")
+                log.warning(f'Failed to check unpushed commits for branch {branch} in {self.path}')
+                return ResultError('git')
 
         if unpushed:
-            log.debug(f"Unpushed branches in {self.path}: {unpushed}")
+            log.debug(f'Unpushed branches in {self.path}: {unpushed}')
             return sorted(unpushed)
-        log.debug(f"No unpushed branches in {self.path}")
+        log.debug(f'No unpushed branches in {self.path}')
         return False
 
     @cached_property
     def unmerged(self) -> StatusResult:
         """Check if the repository has unmerged changes on base vs head."""
         if not self._has_branch(args.merged_base_branch):
-            log.error(
-                f"Base branch {args.merged_base_branch} does not exist in {self.path}"
-            )
-            return ResultError("base")
+            if not self.ignore.unmerged:
+                log.error(f'Base branch {args.merged_base_branch} does not exist in {self.path}')
+            return ResultError('base')
         if not self._has_branch(args.merged_head_branch):
-            log.error(
-                f"Head branch {args.merged_head_branch} does not exist in {self.path}"
-            )
-            return ResultError("head")
+            if not self.ignore.unmerged:
+                log.error(f'Head branch {args.merged_head_branch} does not exist in {self.path}')
+            return ResultError('head')
         try:
             output_up = run_git(
-                "log",
-                f"{args.merged_base_branch}..{args.merged_head_branch}",
-                "--oneline",
+                'log',
+                f'{args.merged_base_branch}..{args.merged_head_branch}',
+                '--oneline',
                 cwd=self.path,
             )
             output_down = run_git(
-                "log",
-                f"{args.merged_head_branch}..{args.merged_base_branch}",
-                "--oneline",
+                'log',
+                f'{args.merged_head_branch}..{args.merged_base_branch}',
+                '--oneline',
                 cwd=self.path,
             )
-            log.debug(f"Unmerged upwards changes in {self.path}: {output_up}")
-            log.debug(f"Unmerged downwards changes in {self.path}: {output_down}")
+            log.debug(f'Unmerged upwards changes in {self.path}: {output_up}')
+            log.debug(f'Unmerged downwards changes in {self.path}: {output_down}')
             return bool(output_up) or bool(output_down)
         except subprocess.CalledProcessError:
-            log.warning(
-                f"Failed to check unmerged changes in repository at {self.path}"
-            )
-            return ResultError("git")
+            log.warning(f'Failed to check unmerged changes in repository at {self.path}')
+            return ResultError('git')
 
     @cached_property
     def remote_changed(self) -> StatusResult:
         """Check if the remote repository has changes."""
         if not self._has_remote():
-            log.error(f"Repository at {self.path} has no remote configured.")
-            return ResultError("remote")
+            log.error(f'Repository at {self.path} has no remote configured.')
+            return ResultError('remote')
         if not_tracking := self._not_tracking:
-            log.error(f"Not all branches in {self.path} are tracking remote branches.")
-            return ResultError(",".join(not_tracking))
+            log.error(f'Not all branches in {self.path} are tracking remote branches.')
+            return ResultError(','.join(not_tracking))
 
         try:
-            output = run_git(
-                "fetch", "--dry-run", "--all", "--porcelain", cwd=self.path
-            )
-            log.debug(f"Remote changes in {self.path}: {output}")
+            output = run_git('fetch', '--dry-run', '--all', '--porcelain', cwd=self.path)
+            log.debug(f'Remote changes in {self.path}: {output}')
             if output:
                 return [
-                    line.split()[1].replace("refs/remote/origin", "")
+                    line.split()[1].replace('refs/remote/origin', '')
                     for line in output.splitlines()
                     if line
                 ]
         except subprocess.CalledProcessError:
-            log.warning(f"Failed to check remote changes in repository at {self.path}")
-            return ResultError("git")
+            log.warning(f'Failed to check remote changes in repository at {self.path}')
+            return ResultError('git')
         return False
 
     @cached_property
     def pre_commit(self) -> StatusResult:
         """Check if the repository has pre-commit hooks configured."""
-        pre_commit_path = self.path / ".pre-commit-config.yaml"
+        pre_commit_path = self.path / '.pre-commit-config.yaml'
         if not pre_commit_path.is_file():
-            log.debug(f"No pre-commit config found in {self.path}")
-            return colorize("No config", "yellow")
-        pre_commit_hook_path = self.path / ".git" / "hooks" / "pre-commit"
+            log.debug(f'No pre-commit config found in {self.path}')
+            return colorize('No config', 'yellow')
+        pre_commit_hook_path = self.path / '.git' / 'hooks' / 'pre-commit'
         if not pre_commit_hook_path.is_file():
-            log.debug(f"No pre-commit hook found in {self.path}")
-            return colorize("No hook", "red")
+            log.debug(f'No pre-commit hook found in {self.path}')
+            return colorize('No hook', 'red')
         hook_content = pre_commit_hook_path.read_text()
-        if "pre-commit" not in hook_content:
-            log.debug(
-                f"Pre-commit hook in {self.path} does not contain pre-commit commands."
-            )
-            return colorize("No command", "red")
+        if 'pre-commit' not in hook_content:
+            log.debug(f'Pre-commit hook in {self.path} does not contain pre-commit commands.')
+            return colorize('No command', 'red')
 
         return False
 
@@ -558,27 +604,25 @@ class GitRepo:
         not_tracking: set[str] = set()
         for branch in self._all_branches():
             if not self._is_tracking_remote_branch(branch):
-                log.warning(
-                    f"Branch {branch} in {self.path} is not tracking a remote branch."
-                )
+                log.warning(f'Branch {branch} in {self.path} is not tracking a remote branch.')
                 not_tracking.add(branch)
-        log.debug(f"All branches in {self.path} are tracking remote branches.")
+        log.debug(f'All branches in {self.path} are tracking remote branches.')
         return not_tracking
 
     def _has_remote(self) -> bool:
         """Check if the repository has a remote."""
         try:
-            output = run_git("remote", "-v", cwd=self.path)
-            log.debug(f"Remote status in {self.path}: {output}")
+            output = run_git('remote', '-v', cwd=self.path)
+            log.debug(f'Remote status in {self.path}: {output}')
             return bool(output)
         except subprocess.CalledProcessError:
-            log.warning(f"Failed to check remote in repository at {self.path}")
+            log.warning(f'Failed to check remote in repository at {self.path}')
             return False
 
     def _has_branch(self, branch: str) -> bool:
         """Check if the repository has a specific branch."""
         try:
-            _ = run_git("rev-parse", "--verify", branch, cwd=self.path)
+            _ = run_git('rev-parse', '--verify', branch, cwd=self.path)
         except subprocess.CalledProcessError:
             return False
         return True
@@ -586,63 +630,59 @@ class GitRepo:
     def _is_tracking_remote_branch(self, branch: str) -> bool:
         """Check if the repository is tracking a remote branch."""
         try:
-            output = run_git(
-                "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}", cwd=self.path
-            )
-            log.debug(f"Tracking remote branch {branch} in {self.path}: {output}")
+            output = run_git('rev-parse', '--abbrev-ref', f'{branch}@{{upstream}}', cwd=self.path)
+            log.debug(f'Tracking remote branch {branch} in {self.path}: {output}')
             return bool(output)
         except subprocess.CalledProcessError:
-            log.warning(
-                f"Failed to check tracking for {branch} in repository at {self.path}"
-            )
+            log.warning(f'Failed to check tracking for {branch} in repository at {self.path}')
             return False
 
     def _all_branches(self) -> list[str]:
         """Return a list of all branches in the repository."""
         try:
             output = run_git(
-                "for-each-ref",
-                "--format=%(refname:short)",
-                "refs/heads/",
+                'for-each-ref',
+                '--format=%(refname:short)',
+                'refs/heads/',
                 cwd=self.path,
             )
             branches = output.splitlines()
-            log.debug(f"Branches in {self.path}: {branches}")
+            log.debug(f'Branches in {self.path}: {branches}')
             return [branch.strip() for branch in branches]
         except subprocess.CalledProcessError:
-            log.warning(f"Failed to list branches in repository at {self.path}")
+            log.warning(f'Failed to list branches in repository at {self.path}')
             return []
 
     def _all_remote_branches(self) -> list[str]:
         """Return a list of all remote branches in the repository."""
         try:
             output = run_git(
-                "for-each-ref",
-                "--format=%(refname:short)",
-                "refs/remotes/",
+                'for-each-ref',
+                '--format=%(refname:short)',
+                'refs/remotes/',
                 cwd=self.path,
             )
             branches = output.splitlines()
-            log.debug(f"Remote branches in {self.path}: {branches}")
+            log.debug(f'Remote branches in {self.path}: {branches}')
             return [branch.strip() for branch in branches]
         except subprocess.CalledProcessError:
-            log.warning(f"Failed to list remote branches in repository at {self.path}")
+            log.warning(f'Failed to list remote branches in repository at {self.path}')
             return []
 
     def get_status(self) -> GitRepoStatus:
         """Return the status of the repository."""
         ret = GitRepoStatus(
             repo_name=self.name,
-            changed=self.changed if check("changed") else False,
-            staged=self.staged if check("staged") else False,
-            stashed=self.stashed if check("stashed") else False,
-            detached=self.detached if check("detached") else False,
-            abnormal=self.abnormal if check("abnormal") else False,
-            untracked=self.untracked if check("untracked") else False,
-            unpushed=self.unpushed if check("unpushed") else False,
-            unmerged=self.unmerged if check("unmerged") else False,
-            remote_changed=self.remote_changed if check("remote_changed") else False,
-            pre_commit=self.pre_commit if check("pre_commit") else False,
+            changed=self.changed if check('changed') else False,
+            staged=self.staged if check('staged') else False,
+            stashed=self.stashed if check('stashed') else False,
+            detached=self.detached if check('detached') else False,
+            abnormal=self.abnormal if check('abnormal') else False,
+            untracked=self.untracked if check('untracked') else False,
+            unpushed=self.unpushed if check('unpushed') else False,
+            unmerged=self.unmerged if check('unmerged') else False,
+            remote_changed=self.remote_changed if check('remote_changed') else False,
+            pre_commit=self.pre_commit if check('pre_commit') else False,
         )
         for field in ret.__dataclass_fields__:
             if getattr(self.ignore, field, False):
@@ -651,11 +691,11 @@ class GitRepo:
 
     def __str__(self) -> str:
         """Return a string representation of the Git repository."""
-        return f"{self.name} ({self.path})"
+        return f'{self.name} ({self.path})'
 
     def __repr__(self) -> str:
         """Return a detailed string representation of the Git repository."""
-        return f"GitRepo(path={self.path!s})"
+        return f'GitRepo(path={self.path!s})'
 
     def __hash__(self) -> int:
         """Return a hash of the repository path."""
@@ -680,54 +720,51 @@ class GitRepo:
         return self.path > other.path
 
 
-RE_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+RE_ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
 
 def visible_width(s: str) -> int:
     """Return the visible width of a string, excluding ANSI escape sequences."""
-    return len(RE_ANSI.sub("", str(s)))
+    return len(RE_ANSI.sub('', str(s)))
 
 
 def pseudo_tabulate(
-    tabular_data: list[list[str]], headers: list[str], tablefmt: str = "simple_outline"
+    tabular_data: list[list[str]], headers: list[str], tablefmt: str = 'simple_outline'
 ) -> str:
     """Return a pseudo-tabulated string representation of the table."""
-    if tablefmt != "simple_outline":
+    if tablefmt != 'simple_outline':
         _err = f"Unsupported table format '{tablefmt}' without tabulate package."
         raise ValueError(_err)
 
     # Combine headers and rows for width calc
     all_rows = [headers, *tabular_data]
-    col_widths = [
-        max(visible_width(cell) for cell in col) for col in zip(*all_rows, strict=True)
-    ]
+    col_widths = [max(visible_width(cell) for cell in col) for col in zip(*all_rows, strict=True)]
 
     def pad_cell(cell: str, width: int) -> str:
         pad_len = width - visible_width(cell)
-        return f"{cell}{' ' * pad_len}"
+        return f'{cell}{" " * pad_len}'
 
-    def format_row(row: list[str], sep: str = "│") -> str:
+    def format_row(row: list[str], sep: str = '│') -> str:
         return (
             sep
             + sep.join(
-                f" {pad_cell(cell, width)} "
-                for cell, width in zip(row, col_widths, strict=False)
+                f' {pad_cell(cell, width)} ' for cell, width in zip(row, col_widths, strict=False)
             )
             + sep
         )
 
-    def border(left: str, mid: str, right: str, fill: str = "─") -> str:
+    def border(left: str, mid: str, right: str, fill: str = '─') -> str:
         return left + mid.join(fill * (w + 2) for w in col_widths) + right
 
     # Build the table
-    lines = [border("┌", "┬", "┐")]
+    lines = [border('┌', '┬', '┐')]
     lines.append(format_row(headers))
-    lines.append(border("├", "┼", "┤"))
+    lines.append(border('├', '┼', '┤'))
     for row in tabular_data:
         lines.append(format_row(row))
-    lines.append(border("└", "┴", "┘"))
+    lines.append(border('└', '┴', '┘'))
 
-    return "\n".join(lines)
+    return '\n'.join(lines)
 
 
 class TabulateFunc(Protocol):
@@ -737,7 +774,7 @@ class TabulateFunc(Protocol):
         self,
         tabular_data: list[list[str]],
         headers: list[str],
-        tablefmt: str = "simple_outline",
+        tablefmt: str = 'simple_outline',
     ) -> str:
         """Call the tabulate function with the given parameters."""
         ...
@@ -758,26 +795,25 @@ def get_tabulate() -> TabulateFunc:
 def pretty_print(results: list[GitRepoStatus]) -> None:
     """Print the results in a table format."""
     fields = results[0].__dataclass_fields__
-    headers = [v.title().replace("_", " ") for v in fields if check(v)]
+    headers = [v.title().replace('_', ' ') for v in fields if check(v)]
 
     def _show_field(value: StatusResult) -> str:
         """Check if a field should be shown based on command line arguments."""
         if isinstance(value, bool):
-            return colorize("Yes", "yellow") if value else ""
+            return colorize('Yes', 'yellow') if value else ''
         if isinstance(value, list):
             if not value:
-                return ""
+                return ''
             if len(value) == 1:
-                return colorize(value[0], "green")
-            return colorize(", ".join(value), "blue")
+                return colorize(value[0], 'green')
+            return colorize(', '.join(value), 'blue')
         return str(value)
 
     table = [
-        [_show_field(getattr(result, v)) for v in fields if check(v)]
-        for result in sorted(results)
+        [_show_field(getattr(result, v)) for v in fields if check(v)] for result in sorted(results)
     ]
     table = [v for v in table if any(v[1:]) or not args.hide_empty]
-    print(get_tabulate()(table, headers=headers, tablefmt="simple_outline"))
+    print(get_tabulate()(table, headers=headers, tablefmt='simple_outline'))
 
 
 def main():
@@ -790,5 +826,5 @@ def main():
     pretty_print(results)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
