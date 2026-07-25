@@ -1,0 +1,881 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+import hashlib
+import json
+import os
+import shutil
+import signal
+import ssl
+import struct
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    import http.client
+    from collections.abc import Awaitable, Callable
+
+STT_URL = os.environ.get('AI_STT_URL', 'wss://stt.d-reis.com/v1/realtime')
+TTS_URL = os.environ.get('AI_TTS_URL', 'https://tts.d-reis.com/v1/audio/speech')
+LLM_URL = os.environ.get('AI_LLM_URL', 'https://llm.d-reis.com/v1/chat/completions')
+ASSIST_URL = os.environ.get('AI_ASSIST_URL', 'wss://hal.d-reis.com/v1/realtime')
+
+STT_PROVIDER = 'nemo-asr'
+TTS_PROVIDER = 'pockettts'
+LLM_PROVIDER = 'llama-server'
+ASSIST_PROVIDER = 'assistant'
+
+STT_SAMPLE_RATE = 16_000
+STT_CHUNK_BYTES = 8_000
+TTS_MODEL = 'kyutai/pocket-tts'
+LLM_MODEL = 'qwen3-4b'
+PCM_SAMPLE_WIDTH = 2
+
+WEBSOCKET_SHORT_LENGTH = 126
+WEBSOCKET_LONG_LENGTH = 127
+WEBSOCKET_MAX_SHORT_PAYLOAD = 0xFFFF
+WEBSOCKET_CLOSE = 0x8
+WEBSOCKET_PING = 0x9
+WEBSOCKET_PONG = 0xA
+WEBSOCKET_TEXT = 0x1
+WEBSOCKET_CONTINUATION = 0x0
+
+
+class AiError(Exception):
+    """A user-facing AI helper error."""
+
+
+class WebSocketClosedError(Exception):
+    """The WebSocket peer closed its connection."""
+
+
+def format_duration(seconds: float) -> str:
+    if seconds < 1:
+        return f'{seconds * 1_000:.0f} ms'
+    return f'{seconds:.2f} s'
+
+
+class ModeStatus:
+    """Report recording state and end-to-end mode latency."""
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self.started_at = time.perf_counter()
+        self.interrupted_at: float | None = None
+        self.is_recording = False
+        self.reported_outputs: set[str] = set()
+
+    def recording_started(self) -> None:
+        self.is_recording = True
+        print(
+            f'=== RECORDING: {self.mode.upper()} (press Ctrl-C to stop) ===',
+            file=sys.stderr,
+            flush=True,
+        )
+        self._report_latency(self.started_at, 'start', 'recording ready')
+
+    def interrupt(self) -> None:
+        if self.interrupted_at is not None:
+            return
+        self.interrupted_at = time.perf_counter()
+        self._recording_stopped('processing response')
+
+    def recording_stopped(self) -> None:
+        self._recording_stopped('session ended')
+
+    def first_output(self, output: str) -> None:
+        if output in self.reported_outputs:
+            return
+        self.reported_outputs.add(output)
+        if self.interrupted_at is None:
+            self._report_latency(self.started_at, 'start', output)
+        else:
+            self._report_latency(self.interrupted_at, 'interrupt', output)
+
+    def _recording_stopped(self, reason: str) -> None:
+        if not self.is_recording:
+            return
+        self.is_recording = False
+        print(
+            f'=== RECORDING STOPPED: {self.mode.upper()} ({reason}) ===',
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def _report_latency(self, started_at: float, start: str, end: str) -> None:
+        duration = format_duration(time.perf_counter() - started_at)
+        print(
+            f'[timing] {self.mode}: {start} -> {end}: {duration}',
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+class WebSocket:
+    _GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+
+    def __init__(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        self.reader = reader
+        self.writer = writer
+        self.closed = False
+        self.fragments = bytearray()
+        self.fragment_opcode: int | None = None
+
+    @classmethod
+    async def connect(cls, url: str, token: str) -> WebSocket:  # noqa: C901
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in ('ws', 'wss') or parsed.hostname is None:
+            _err = f'invalid WebSocket URL: {url}'
+            raise AiError(_err)
+
+        secure = parsed.scheme == 'wss'
+        port = parsed.port or (443 if secure else 80)
+        context = ssl.create_default_context() if secure else None
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    parsed.hostname,
+                    port,
+                    ssl=context,
+                    server_hostname=parsed.hostname if secure else None,
+                ),
+                timeout=30,
+            )
+        except (OSError, TimeoutError) as error:
+            _err = f'WebSocket connection failed: {error}'
+            raise AiError(_err) from error
+
+        key = base64.b64encode(os.urandom(16)).decode()
+        target = parsed.path or '/'
+        if parsed.query:
+            target = f'{target}?{parsed.query}'
+        host = parsed.hostname if parsed.port is None else f'{parsed.hostname}:{parsed.port}'
+        request = '\r\n'.join(
+            (
+                f'GET {target} HTTP/1.1',
+                f'Host: {host}',
+                'Upgrade: websocket',
+                'Connection: Upgrade',
+                f'Sec-WebSocket-Key: {key}',
+                'Sec-WebSocket-Version: 13',
+                f'Authorization: Bearer {token}',
+                '\r\n',
+            ),
+        )
+        writer.write(request.encode())
+        await writer.drain()
+
+        try:
+            status_line = (await reader.readline()).decode(errors='replace').strip()
+            headers: dict[str, str] = {}
+            while line := await reader.readline():
+                if line == b'\r\n':
+                    break
+                name, _, value = line.decode(errors='replace').partition(':')
+                headers[name.strip().lower()] = value.strip()
+        except (OSError, UnicodeError) as error:
+            writer.close()
+            await writer.wait_closed()
+            _err = f'WebSocket handshake failed: {error}'
+            raise AiError(_err) from error
+
+        expected_accept = base64.b64encode(
+            hashlib.sha1(
+                f'{key}{cls._GUID}'.encode(),
+                usedforsecurity=False,
+            ).digest(),
+        ).decode()
+        if (
+            not status_line.startswith('HTTP/1.1 101 ')
+            or headers.get(
+                'sec-websocket-accept',
+            )
+            != expected_accept
+        ):
+            writer.close()
+            await writer.wait_closed()
+            _err = f'WebSocket handshake failed: {status_line} {headers}'
+            raise AiError(_err)
+        return cls(reader, writer)
+
+    async def _send_frame(self, opcode: int, payload: bytes = b'') -> None:
+        if self.closed:
+            raise WebSocketClosedError
+        length = len(payload)
+        header = bytearray((0x80 | opcode,))
+        if length < WEBSOCKET_SHORT_LENGTH:
+            header.append(0x80 | length)
+        elif length <= WEBSOCKET_MAX_SHORT_PAYLOAD:
+            header.append(0x80 | WEBSOCKET_SHORT_LENGTH)
+            header.extend(struct.pack('!H', length))
+        else:
+            header.append(0x80 | WEBSOCKET_LONG_LENGTH)
+            header.extend(struct.pack('!Q', length))
+
+        mask = os.urandom(4)
+        header.extend(mask)
+        header.extend(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+        self.writer.write(header)
+        try:
+            await self.writer.drain()
+        except (ConnectionError, OSError) as error:
+            self.closed = True
+            raise WebSocketClosedError from error
+
+    async def send_text(self, message: str) -> None:
+        await self._send_frame(WEBSOCKET_TEXT, message.encode())
+
+    async def receive_text(self) -> str | None:  # noqa: C901, PLR0912
+        while not self.closed:
+            try:
+                first, second = await self.reader.readexactly(2)
+                final = bool(first & 0x80)
+                opcode = first & 0x0F
+                masked = bool(second & 0x80)
+                length = second & 0x7F
+                if length == WEBSOCKET_SHORT_LENGTH:
+                    length = struct.unpack('!H', await self.reader.readexactly(2))[0]
+                elif length == WEBSOCKET_LONG_LENGTH:
+                    length = struct.unpack('!Q', await self.reader.readexactly(8))[0]
+                mask = await self.reader.readexactly(4) if masked else b''
+                payload = await self.reader.readexactly(length)
+            except asyncio.IncompleteReadError, ConnectionError, OSError:
+                self.closed = True
+                return None
+
+            if masked:
+                payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+            if opcode == WEBSOCKET_CLOSE:
+                if not self.closed:
+                    await self._send_frame(WEBSOCKET_CLOSE, payload)
+                self.closed = True
+                return None
+            if opcode == WEBSOCKET_PING:
+                await self._send_frame(WEBSOCKET_PONG, payload)
+                continue
+            if opcode == WEBSOCKET_PONG:
+                continue
+            if opcode == WEBSOCKET_TEXT:
+                if final:
+                    return payload.decode()
+                self.fragments = bytearray(payload)
+                self.fragment_opcode = opcode
+                continue
+            if opcode == WEBSOCKET_CONTINUATION and self.fragment_opcode == WEBSOCKET_TEXT:
+                self.fragments.extend(payload)
+                if final:
+                    message = self.fragments.decode()
+                    self.fragments.clear()
+                    self.fragment_opcode = None
+                    return message
+                continue
+            _err = f'unsupported WebSocket opcode: {opcode}'
+            raise AiError(_err)
+        return None
+
+    async def close(self) -> None:
+        if not self.closed:
+            with contextlib.suppress(WebSocketClosedError):
+                await self._send_frame(WEBSOCKET_CLOSE, struct.pack('!H', 1000))
+            self.closed = True
+        self.writer.close()
+        with contextlib.suppress(OSError):
+            await self.writer.wait_closed()
+
+
+def usage() -> str:
+    return '\n'.join(
+        (
+            f'Usage: {sys.argv[0]} assist',
+            f'       {sys.argv[0]} stt',
+            f'       {sys.argv[0]} tts <text> [voice]',
+            f'       {sys.argv[0]} llm <user-prompt> [system-prompt]',
+        ),
+    )
+
+
+def require_command(command: str) -> str:
+    path = shutil.which(command)
+    if path is None:
+        _err = f'required command not found: {command}'
+        raise AiError(_err)
+    return path
+
+
+def auth_token(provider: str) -> str:
+    auth_command = require_command('ak-auth-provider')
+    try:
+        result = subprocess.run(  # noqa: S603
+            [auth_command, 'proxy', provider],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as error:
+        _err = f'authentication failed for {provider}'
+        raise AiError(_err) from error
+
+    token = result.stdout.strip()
+    if not token:
+        _err = f'authentication returned an empty token for {provider}'
+        raise AiError(_err)
+    return token
+
+
+def json_request(url: str, token: str, body: dict[str, Any]) -> urllib.request.Request:
+    if urllib.parse.urlsplit(url).scheme not in ('http', 'https'):
+        _err = f'invalid URL scheme for JSON request: {url}'
+        raise AiError(_err)
+    return urllib.request.Request(  # noqa: S310
+        url,
+        data=json.dumps(body).encode(),
+        headers={
+            'Accept': 'application/json',
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json',
+        },
+        method='POST',
+    )
+
+
+def open_request(request: urllib.request.Request) -> http.client.HTTPResponse:
+    try:
+        return urllib.request.urlopen(request, timeout=300)  # noqa: S310
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode(errors='replace').strip()
+        message = f'{error.code} {error.reason}'
+        if detail:
+            message = f'{message}: {detail}'
+        raise AiError(message) from error
+    except urllib.error.URLError as error:
+        _err = f'failed to open request: {error.reason}'
+        raise AiError(_err) from error
+
+
+async def stop_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=3)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+
+
+@dataclass(frozen=True)
+class PcmFormat:
+    """PCM stream parameters passed between the services and SoX."""
+
+    sample_rate: int
+    sample_width: int
+    channels: int
+
+
+def sox_pcm_arguments(audio_format: PcmFormat) -> list[str]:
+    return [
+        '-t',
+        'raw',
+        '-r',
+        str(audio_format.sample_rate),
+        '-e',
+        'signed-integer',
+        '-b',
+        str(audio_format.sample_width * 8),
+        '-c',
+        str(audio_format.channels),
+        '-L',
+    ]
+
+
+async def start_recorder(
+    sox_command: str,
+    audio_format: PcmFormat,
+) -> asyncio.subprocess.Process:
+    process = await asyncio.create_subprocess_exec(
+        sox_command,
+        '-q',
+        '--buffer',
+        str(STT_CHUNK_BYTES),
+        '-d',
+        *sox_pcm_arguments(audio_format),
+        '-',
+        stdout=asyncio.subprocess.PIPE,
+    )
+    if process.stdout is None:
+        await stop_process(process)
+        _err = 'failed to open the SoX audio stream'
+        raise AiError(_err)
+    return process
+
+
+class PcmPlayer:
+    """Stream PCM audio to one SoX playback process."""
+
+    def __init__(
+        self,
+        sox_command: str,
+        on_first_audio: Callable[[], None] | None = None,
+    ) -> None:
+        self.sox_command = sox_command
+        self.on_first_audio = on_first_audio
+        self.process: asyncio.subprocess.Process | None = None
+        self.received_audio = False
+
+    async def start(self, audio_format: PcmFormat) -> None:
+        if self.process is not None:
+            _err = 'audio playback has already started'
+            raise AiError(_err)
+        self.process = await asyncio.create_subprocess_exec(
+            self.sox_command,
+            '-q',
+            *sox_pcm_arguments(audio_format),
+            '-',
+            '-d',
+            stdin=asyncio.subprocess.PIPE,
+        )
+        if self.process.stdin is None:
+            await stop_process(self.process)
+            _err = 'failed to open the SoX playback stream'
+            raise AiError(_err)
+
+    async def write(self, chunk: bytes) -> None:
+        if self.process is None or self.process.stdin is None:
+            _err = 'received audio before the stream format'
+            raise AiError(_err)
+        self.process.stdin.write(chunk)
+        try:
+            await self.process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError) as error:
+            _err = 'SoX playback ended unexpectedly'
+            raise AiError(_err) from error
+        if chunk and not self.received_audio:
+            self.received_audio = True
+            if self.on_first_audio is not None:
+                self.on_first_audio()
+
+    async def close(self) -> None:
+        if self.process is None:
+            return
+        if self.process.stdin is not None:
+            self.process.stdin.close()
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                await self.process.stdin.wait_closed()
+        if await self.process.wait() != 0:
+            _err = 'SoX playback failed'
+            raise AiError(_err)
+
+
+class RealtimeEventHandler(Protocol):
+    status: ModeStatus
+
+    async def handle(self, data: dict[str, Any]) -> None:
+        """Handle one realtime service event."""
+
+    async def close(self) -> None:
+        """Finish output produced by the realtime service."""
+
+
+class SttEventHandler:
+    def __init__(self, status: ModeStatus) -> None:
+        self.status = status
+        self.printed_text = False
+
+    async def handle(self, data: dict[str, Any]) -> None:
+        delta = data.get('delta') or data.get('transcript_delta')
+        if isinstance(delta, str) and delta:
+            self.status.first_output('first transcript')
+            sys.stdout.write((' ' if self.printed_text else '') + delta)
+            sys.stdout.flush()
+            self.printed_text = True
+            return
+
+        transcript = data.get('transcript')
+        if (
+            not self.printed_text
+            and isinstance(transcript, str)
+            and transcript
+            and 'completed' in str(data.get('type', ''))
+        ):
+            self.status.first_output('first transcript')
+            sys.stdout.write(transcript)
+            sys.stdout.flush()
+            self.printed_text = True
+
+    async def close(self) -> None:
+        if self.printed_text:
+            sys.stdout.write('\n')
+            sys.stdout.flush()
+
+
+def assist_audio_format(data: dict[str, Any]) -> PcmFormat:
+    sample_rate = data.get('sample_rate')
+    sample_width = data.get('sample_width')
+    channels = data.get('channels')
+    if (
+        data.get('format') != 'pcm16'
+        or not isinstance(sample_rate, int)
+        or sample_rate <= 0
+        or sample_width != PCM_SAMPLE_WIDTH
+        or channels not in (1, 2)
+    ):
+        _err = 'assistant returned an invalid PCM audio format'
+        raise AiError(_err)
+    return PcmFormat(sample_rate, sample_width, channels)
+
+
+class AssistEventHandler:
+    def __init__(self, player: PcmPlayer, status: ModeStatus) -> None:
+        self.player = player
+        self.status = status
+
+    async def handle(self, data: dict[str, Any]) -> None:
+        event_type = data.get('type')
+        if event_type == 'response.audio.started':
+            await self.player.start(assist_audio_format(data))
+        elif event_type == 'response.audio.delta':
+            audio = data.get('audio')
+            if not isinstance(audio, str):
+                _err = 'assistant returned an invalid audio delta'
+                raise AiError(_err)
+            try:
+                chunk = base64.b64decode(audio, validate=True)
+            except ValueError as error:
+                _err = 'assistant returned an invalid base64 audio delta'
+                raise AiError(_err) from error
+            await self.player.write(chunk)
+
+    async def close(self) -> None:
+        await self.player.close()
+
+
+async def receive_realtime_events(
+    websocket: WebSocket,
+    handler: RealtimeEventHandler,
+    stop: asyncio.Event,
+) -> str | None:
+    try:
+        while (raw := await websocket.receive_text()) is not None:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as error:
+                _err = 'realtime service returned invalid JSON'
+                raise AiError(_err) from error
+            if not isinstance(data, dict):
+                _err = 'realtime service returned a non-object event'
+                raise AiError(_err)
+            if data.get('type') == 'error':
+                return str(data.get('message') or data)
+            await handler.handle(data)
+        return None
+    finally:
+        stop.set()
+
+
+async def send_microphone_audio(
+    websocket: WebSocket,
+    recorder: asyncio.subprocess.Process,
+    stop: asyncio.Event,
+) -> None:
+    stream = recorder_stream(recorder)
+    while not stop.is_set():
+        chunk = await read_microphone_chunk(stream, stop)
+        if chunk is None:
+            return
+        if stop.is_set():
+            return
+        if not await append_audio(websocket, chunk):
+            stop.set()
+            return
+
+
+def recorder_stream(recorder: asyncio.subprocess.Process) -> asyncio.StreamReader:
+    if recorder.stdout is None:
+        _err = 'failed to open the SoX audio stream'
+        raise AiError(_err)
+    return recorder.stdout
+
+
+async def read_microphone_chunk(
+    stream: asyncio.StreamReader,
+    stop: asyncio.Event,
+) -> bytes | None:
+    chunk = await stream.read(STT_CHUNK_BYTES)
+    if chunk:
+        return chunk
+    if stop.is_set():
+        return None
+    _err = 'SoX audio stream ended unexpectedly'
+    raise AiError(_err)
+
+
+async def append_audio(websocket: WebSocket, chunk: bytes) -> bool:
+    try:
+        await websocket.send_text(
+            json.dumps(
+                {
+                    'type': 'input_audio_buffer.append',
+                    'audio': base64.b64encode(chunk).decode(),
+                },
+            ),
+        )
+    except WebSocketClosedError:
+        return False
+    return True
+
+
+async def run_microphone_session(
+    websocket: WebSocket,
+    recorder: asyncio.subprocess.Process,
+    handler: RealtimeEventHandler,
+    stop: asyncio.Event,
+) -> str | None:
+    receiver = asyncio.create_task(receive_realtime_events(websocket, handler, stop))
+    try:
+        await send_microphone_audio(websocket, recorder, stop)
+        with contextlib.suppress(WebSocketClosedError):
+            await websocket.send_text(json.dumps({'type': 'input_audio_buffer.commit'}))
+        return await receiver
+    finally:
+        if not receiver.done():
+            _ = receiver.cancel()
+            _ = await asyncio.gather(receiver, return_exceptions=True)
+
+
+async def close_realtime(
+    recorder: asyncio.subprocess.Process | None,
+    websocket: WebSocket | None,
+    handler: RealtimeEventHandler,
+) -> None:
+    if recorder is not None:
+        await stop_process(recorder)
+    if websocket is not None:
+        await websocket.close()
+    await handler.close()
+
+
+async def run_realtime(
+    url: str,
+    provider: str,
+    error_label: str,
+    handler: RealtimeEventHandler,
+    sox_command: str,
+) -> None:
+    status = handler.status
+    token = await asyncio.to_thread(auth_token, provider)
+    audio_format = PcmFormat(STT_SAMPLE_RATE, PCM_SAMPLE_WIDTH, 1)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def interrupt() -> None:
+        status.interrupt()
+        stop.set()
+
+    with contextlib.suppress(NotImplementedError):
+        loop.add_signal_handler(signal.SIGINT, interrupt)
+
+    recorder: asyncio.subprocess.Process | None = None
+    websocket: WebSocket | None = None
+    server_error: str | None = None
+    try:
+        websocket = await WebSocket.connect(url, token)
+        await websocket.send_text(
+            json.dumps(
+                {
+                    'type': 'session.update',
+                    'session': {
+                        'input_audio_sample_rate': audio_format.sample_rate,
+                        'input_audio_channels': audio_format.channels,
+                    },
+                },
+            ),
+        )
+        recorder = await start_recorder(sox_command, audio_format)
+        status.recording_started()
+        server_error = await run_microphone_session(websocket, recorder, handler, stop)
+    finally:
+        stop.set()
+        status.recording_stopped()
+        await close_realtime(recorder, websocket, handler)
+
+    if server_error is not None:
+        _err = f'{error_label} server error: {server_error}'
+        raise AiError(_err)
+
+
+async def run_stt() -> None:
+    status = ModeStatus('stt')
+    await run_realtime(
+        STT_URL,
+        STT_PROVIDER,
+        'STT',
+        SttEventHandler(status),
+        require_command('sox'),
+    )
+
+
+async def run_assist() -> None:
+    sox_command = require_command('sox')
+    status = ModeStatus('assist')
+    await run_realtime(
+        ASSIST_URL,
+        ASSIST_PROVIDER,
+        'assistant',
+        AssistEventHandler(
+            PcmPlayer(
+                sox_command,
+                lambda: status.first_output('first spoken sound'),
+            ),
+            status,
+        ),
+        sox_command,
+    )
+
+
+def tts_audio_format(response: http.client.HTTPResponse) -> PcmFormat:
+    sample_rate = response.headers.get('X-Audio-Sample-Rate')
+    channels = response.headers.get('X-Audio-Channels', '1')
+    if sample_rate is None or not sample_rate.isdigit():
+        _err = 'TTS response did not include a valid X-Audio-Sample-Rate'
+        raise AiError(_err)
+    if channels not in ('1', '2'):
+        _err = 'TTS response did not include valid X-Audio-Channels'
+        raise AiError(_err)
+    return PcmFormat(int(sample_rate), PCM_SAMPLE_WIDTH, int(channels))
+
+
+async def run_tts(text: str, voice: str | None) -> None:
+    status = ModeStatus('tts')
+    sox_command = require_command('sox')
+    token = await asyncio.to_thread(auth_token, TTS_PROVIDER)
+    body: dict[str, Any] = {
+        'model': TTS_MODEL,
+        'input': text,
+        'response_format': 'pcm',
+    }
+    if voice is not None:
+        body['voice'] = voice
+
+    response = await asyncio.to_thread(open_request, json_request(TTS_URL, token, body))
+    player = PcmPlayer(
+        sox_command,
+        lambda: status.first_output('first spoken sound'),
+    )
+    try:
+        await player.start(tts_audio_format(response))
+        while chunk := await asyncio.to_thread(response.read, 64 * 1024):
+            await player.write(chunk)
+    finally:
+        response.close()
+        await player.close()
+
+
+def run_llm(user_prompt: str, system_prompt: str | None) -> None:
+    status = ModeStatus('llm')
+    token = auth_token(LLM_PROVIDER)
+    messages: list[dict[str, str]] = []
+    if system_prompt is not None:
+        messages.append({'role': 'system', 'content': system_prompt})
+    messages.append({'role': 'user', 'content': user_prompt})
+
+    request = json_request(
+        LLM_URL,
+        token,
+        {
+            'model': LLM_MODEL,
+            'messages': messages,
+            'stream': False,
+        },
+    )
+    with open_request(request) as response:
+        try:
+            result = json.load(response)
+            content = result['choices'][0]['message']['content']
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as error:
+            _err = 'LLM returned an invalid chat-completion response'
+            raise AiError(_err) from error
+
+    if not isinstance(content, str):
+        _err = 'LLM returned a non-text response'
+        raise AiError(_err)
+    status.first_output('response text')
+    print(content)
+
+
+def run_realtime_mode(
+    mode: str,
+    arguments: list[str],
+    runner: Callable[[], Awaitable[None]],
+) -> None:
+    if arguments:
+        _err = f'{mode} accepts no arguments\n{usage()}'
+        raise AiError(_err)
+    asyncio.run(runner())
+
+
+def run_assist_mode(arguments: list[str]) -> None:
+    run_realtime_mode('assist', arguments, run_assist)
+
+
+def run_stt_mode(arguments: list[str]) -> None:
+    run_realtime_mode('stt', arguments, run_stt)
+
+
+def run_tts_mode(arguments: list[str]) -> None:
+    if len(arguments) not in (1, 2):
+        raise AiError('tts requires text and accepts an optional voice\n' + usage())
+    text, *voices = arguments
+    voice = voices[0] if voices else None
+    asyncio.run(run_tts(text, voice))
+
+
+def run_llm_mode(arguments: list[str]) -> None:
+    if len(arguments) not in (1, 2):
+        raise AiError(
+            'llm requires a user prompt and accepts an optional system prompt\n' + usage(),
+        )
+    user_prompt, *system_prompts = arguments
+    system_prompt = system_prompts[0] if system_prompts else None
+    run_llm(user_prompt, system_prompt)
+
+
+def main() -> None:
+    command_line = sys.argv[1:]
+    if not command_line:
+        raise AiError(usage())
+    mode, *arguments = command_line
+    handlers: dict[str, Callable[[list[str]], None]] = {
+        'assist': run_assist_mode,
+        'stt': run_stt_mode,
+        'tts': run_tts_mode,
+        'llm': run_llm_mode,
+    }
+    handler = handlers.get(mode)
+    if handler is None:
+        _err = f'unknown mode: {mode}\n{usage()}'
+        raise AiError(_err)
+    handler(arguments)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except AiError as error:
+        print(f'Error: {error}', file=sys.stderr)
+        raise SystemExit(1) from error
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None

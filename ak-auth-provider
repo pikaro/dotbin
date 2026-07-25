@@ -1,12 +1,101 @@
 #!/bin/bash
 
-PROVIDER_KIND="$1"
-PROVIDER_NAME="$2"
-if [ -z "$PROVIDER_NAME" ]; then
-    echo "Usage: $0 <provider_kind> <provider_name>" >&2
+set -eEuo pipefail
+
+# shellcheck source=../dotinc/entrypoint.sh
+source "${HOME}/.local/shell-include/entrypoint.sh"
+
+readonly CACHE_PREFIX="kv/temp/oidc"
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || _fatal "required command not found: $1"
+}
+
+jwt_expiry() {
+    local token="$1"
+    local payload decoded
+
+    payload="${token#*.}"
+    [ "$payload" != "$token" ] || return 1
+    payload="${payload%%.*}"
+
+    case $((${#payload} % 4)) in
+    0) ;;
+    2) payload="${payload}==" ;;
+    3) payload="${payload}=" ;;
+    *) return 1 ;;
+    esac
+
+    decoded="$(printf '%s' "$payload" | tr '_-' '/+' | openssl base64 -d -A 2>/dev/null)" || return 1
+    jq -er '.exp | numbers | floor' <<<"$decoded"
+}
+
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+    echo "Usage: $0 <provider-kind> <provider-name> [application-slug]" >&2
     exit 1
 fi
 
-CLIENT_ID="$(ak-client-id "${PROVIDER_KIND}" "${PROVIDER_NAME}")"
+readonly PROVIDER_KIND="$1"
+readonly PROVIDER_NAME="$2"
+APPLICATION_SLUG="${3:-}"
 
-ak auth raw --client-id "${CLIENT_ID}"
+if [ -z "$APPLICATION_SLUG" ]; then
+    APPLICATION_SLUG="$(
+        printf '%s' "$PROVIDER_NAME" |
+            tr '[:upper:]' '[:lower:]' |
+            sed -E 's/[^a-z0-9_]+/-/g; s/^-+//; s/-+$//'
+    )"
+fi
+readonly APPLICATION_SLUG
+
+[[ "$APPLICATION_SLUG" =~ ^[-a-zA-Z0-9_]+$ ]] ||
+    _fatal "invalid application slug: $APPLICATION_SLUG"
+
+require_command ak
+require_command ak-client-id
+require_command jq
+require_command openssl
+require_command vault
+
+readonly CACHE_PATH="${CACHE_PREFIX}/${APPLICATION_SLUG}"
+NOW="$(date +%s)"
+readonly NOW
+
+cached_session="$(vault kv get -format=json "$CACHE_PATH" 2>&1)" && EXITCODE=0 || EXITCODE=$?
+
+if [ "${EXITCODE}" -eq 0 ]; then
+    cached_token="$(jq -r '.data.data.token // empty' <<<"$cached_session")"
+    cached_expiry="$(jq -r '.data.data.expires_at // empty' <<<"$cached_session")"
+
+    if [[ "$cached_expiry" =~ ^[0-9]+$ ]] &&
+        [ "$NOW" -lt "$cached_expiry" ] &&
+        [ -n "$cached_token" ]; then
+        _info "Using cached OIDC token for application '$APPLICATION_SLUG'"
+        printf '%s\n' "$cached_token"
+        exit 0
+    fi
+    _info "Cached OIDC token for application '$APPLICATION_SLUG' is expired or invalid, requesting a new one"
+elif grep -qE 'denied|missing|invalid' <<<"$cached_session"; then
+    _fatal "No Vault token - log into Vault first"
+elif grep -qE 'No value|not found' <<<"$cached_session"; then
+    _info "No cached OIDC token found for application '$APPLICATION_SLUG', requesting a new one"
+else
+    _fatal "Vault error: $cached_session"
+fi
+
+CLIENT_ID="$(ak-client-id "$PROVIDER_KIND" "$PROVIDER_NAME")"
+readonly CLIENT_ID
+
+if ! token="$(ak auth raw --client-id "$CLIENT_ID")"; then
+    _fatal "authentik failed to create an OIDC token for application '$APPLICATION_SLUG'"
+fi
+[ -n "$token" ] || _fatal "authentik returned an empty OIDC token"
+
+expires_at="$(jwt_expiry "$token")" ||
+    _fatal "authentik returned an OIDC token without a valid expiry"
+[ "$NOW" -lt "$expires_at" ] || _fatal "authentik returned an expired OIDC token"
+
+printf '%s' "$token" |
+    vault kv put "$CACHE_PATH" token=- expires_at="$expires_at" >/dev/null
+
+printf '%s\n' "$token"
