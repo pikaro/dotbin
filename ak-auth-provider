@@ -86,14 +86,20 @@ fi
 CLIENT_ID="$(ak-client-id "$PROVIDER_KIND" "$PROVIDER_NAME")"
 readonly CLIENT_ID
 
-if ! token="$(ak auth raw --client-id "$CLIENT_ID")"; then
-    _fatal "authentik failed to create an OIDC token for application '$APPLICATION_SLUG'"
-fi
-[ -n "$token" ] || _fatal "authentik returned an empty OIDC token"
+for attempt in 1 2; do
+    if ! token="$(ak auth raw --client-id "$CLIENT_ID")"; then
+        _fatal "authentik failed to create an OIDC token for application '$APPLICATION_SLUG'"
+    fi
+    [ -n "$token" ] || _fatal "authentik returned an empty OIDC token"
 
-expires_at="$(jwt_expiry "$token")" ||
-    _fatal "authentik returned an OIDC token without a valid expiry"
-[ "$NOW" -lt "$expires_at" ] || _fatal "authentik returned an expired OIDC token"
+    expires_at="$(jwt_expiry "$token")" ||
+        _fatal "authentik returned an OIDC token without a valid expiry"
+    [ "$(date +%s)" -lt "$expires_at" ] && break
+
+    [ "$attempt" -eq 1 ] ||
+        _fatal "authentik returned an expired OIDC token"
+    _info "authentik returned an expired OIDC token, retrying once"
+done
 
 printf '%s' "$token" |
     vault kv put "$CACHE_PATH" token=- expires_at="$expires_at" >/dev/null
