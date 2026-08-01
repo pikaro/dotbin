@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import contextlib
@@ -19,27 +20,35 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     import http.client
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
 
-STT_URL = os.environ.get('AI_STT_URL', 'wss://stt.d-reis.com/v1/realtime')
-TTS_URL = os.environ.get('AI_TTS_URL', 'https://tts.d-reis.com/v1/audio/speech')
-LLM_URL = os.environ.get('AI_LLM_URL', 'https://llm.d-reis.com/v1/chat/completions')
-ASSIST_URL = os.environ.get('AI_ASSIST_URL', 'wss://hal.d-reis.com/v1/realtime')
+DEFAULT_STT_URL = os.environ.get('AI_STT_URL', 'wss://stt.d-reis.com/v1/realtime')
+DEFAULT_TTS_URL = os.environ.get('AI_TTS_URL', 'https://tts.d-reis.com/v1/audio/speech')
+DEFAULT_TTS_MULTI_URL = os.environ.get(
+    'AI_TTS_MULTI_URL',
+    'https://tts.d-reis.com/v1/audio/speech/multi-speaker',
+)
+DEFAULT_LLM_URL = os.environ.get('AI_LLM_URL', 'https://llm.d-reis.com/v1/chat/completions')
+DEFAULT_ASSIST_URL = os.environ.get('AI_ASSIST_URL', 'wss://hal.d-reis.com/v1/realtime')
 
-STT_PROVIDER = 'nemo-asr'
-TTS_PROVIDER = 'pockettts'
-LLM_PROVIDER = 'llama-server'
-ASSIST_PROVIDER = 'assistant'
+DEFAULT_STT_PROVIDER = 'nemo-asr'
+DEFAULT_TTS_PROVIDER = 'pockettts'
+DEFAULT_LLM_PROVIDER = 'llama-server'
+DEFAULT_ASSIST_PROVIDER = 'assistant'
 
 STT_SAMPLE_RATE = 16_000
 STT_CHUNK_BYTES = 8_000
-TTS_MODEL = 'kyutai/pocket-tts'
-LLM_MODEL = 'qwen3-4b'
+# Match MCU append boundaries when replaying its saved audio.
+WAV_INPUT_CHUNK_BYTES = 2_048
+DEFAULT_TTS_MODEL = 'kyutai/pocket-tts'
+DEFAULT_LLM_MODEL = 'qwen3-4b'
 PCM_SAMPLE_WIDTH = 2
+STT_PCM_BYTES_PER_SECOND = STT_SAMPLE_RATE * PCM_SAMPLE_WIDTH
 
 WEBSOCKET_SHORT_LENGTH = 126
 WEBSOCKET_LONG_LENGTH = 127
@@ -66,7 +75,7 @@ def format_duration(seconds: float) -> str:
 
 
 class ModeStatus:
-    """Report recording state and end-to-end mode latency."""
+    """Report audio input state and end-to-end mode latency."""
 
     def __init__(self, mode: str) -> None:
         self.mode = mode
@@ -83,6 +92,14 @@ class ModeStatus:
             flush=True,
         )
         self._report_latency(self.started_at, 'start', 'recording ready')
+
+    def wav_started(self, wav_file: Path) -> None:
+        print(
+            f'=== WAV INPUT: {self.mode.upper()} ({wav_file}) ===',
+            file=sys.stderr,
+            flush=True,
+        )
+        self._report_latency(self.started_at, 'start', 'WAV input ready')
 
     def interrupt(self) -> None:
         if self.interrupted_at is not None:
@@ -260,7 +277,7 @@ class WebSocket:
             if masked:
                 payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
             if opcode == WEBSOCKET_CLOSE:
-                if not self.closed:
+                with contextlib.suppress(WebSocketClosedError):
                     await self._send_frame(WEBSOCKET_CLOSE, payload)
                 self.closed = True
                 return None
@@ -295,17 +312,6 @@ class WebSocket:
         self.writer.close()
         with contextlib.suppress(OSError):
             await self.writer.wait_closed()
-
-
-def usage() -> str:
-    return '\n'.join(
-        (
-            f'Usage: {sys.argv[0]} assist',
-            f'       {sys.argv[0]} stt',
-            f'       {sys.argv[0]} tts <text> [voice]',
-            f'       {sys.argv[0]} llm <user-prompt> [system-prompt]',
-        ),
-    )
 
 
 def require_command(command: str) -> str:
@@ -402,16 +408,19 @@ def sox_pcm_arguments(audio_format: PcmFormat) -> list[str]:
     ]
 
 
-async def start_recorder(
+async def start_audio_input(
     sox_command: str,
     audio_format: PcmFormat,
+    wav_file: Path | None,
 ) -> asyncio.subprocess.Process:
+    source_arguments = ['-d'] if wav_file is None else ['-t', 'wav', str(wav_file)]
+    buffer_bytes = STT_CHUNK_BYTES if wav_file is None else WAV_INPUT_CHUNK_BYTES
     process = await asyncio.create_subprocess_exec(
         sox_command,
         '-q',
         '--buffer',
-        str(STT_CHUNK_BYTES),
-        '-d',
+        str(buffer_bytes),
+        *source_arguments,
         *sox_pcm_arguments(audio_format),
         '-',
         stdout=asyncio.subprocess.PIPE,
@@ -586,14 +595,17 @@ async def receive_realtime_events(
         stop.set()
 
 
-async def send_microphone_audio(
+async def send_input_audio(  # noqa: C901
     websocket: WebSocket,
-    recorder: asyncio.subprocess.Process,
+    audio_input: asyncio.subprocess.Process,
     stop: asyncio.Event,
+    wav_file: Path | None,
 ) -> None:
-    stream = recorder_stream(recorder)
+    stream = audio_input_stream(audio_input)
+    wav_started_at = asyncio.get_running_loop().time()
+    wav_bytes_sent = 0
     while not stop.is_set():
-        chunk = await read_microphone_chunk(stream, stop)
+        chunk = await read_audio_chunk(audio_input, stream, stop, wav_file)
         if chunk is None:
             return
         if stop.is_set():
@@ -601,26 +613,62 @@ async def send_microphone_audio(
         if not await append_audio(websocket, chunk):
             stop.set()
             return
+        if wav_file is not None:
+            wav_bytes_sent += len(chunk)
+            await pace_wav_audio(stop, wav_started_at, wav_bytes_sent)
 
 
-def recorder_stream(recorder: asyncio.subprocess.Process) -> asyncio.StreamReader:
-    if recorder.stdout is None:
+async def pace_wav_audio(
+    stop: asyncio.Event,
+    started_at: float,
+    bytes_sent: int,
+) -> None:
+    """Send WAV-derived PCM at the same rate as live microphone audio."""
+    delay = started_at + (bytes_sent / STT_PCM_BYTES_PER_SECOND) - asyncio.get_running_loop().time()
+    if delay > 0:
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=delay)
+
+
+def audio_input_stream(
+    audio_input: asyncio.subprocess.Process,
+) -> asyncio.StreamReader:
+    if audio_input.stdout is None:
         _err = 'failed to open the SoX audio stream'
         raise AiError(_err)
-    return recorder.stdout
+    return audio_input.stdout
 
 
-async def read_microphone_chunk(
+async def read_audio_chunk(
+    audio_input: asyncio.subprocess.Process,
     stream: asyncio.StreamReader,
     stop: asyncio.Event,
+    wav_file: Path | None,
 ) -> bytes | None:
-    chunk = await stream.read(STT_CHUNK_BYTES)
+    chunk = await read_stream_chunk(stream, wav_file)
     if chunk:
         return chunk
     if stop.is_set():
         return None
+    if wav_file is not None:
+        if await audio_input.wait() != 0:
+            _err = f'SoX failed to read WAV file: {wav_file}'
+            raise AiError(_err)
+        return None
     _err = 'SoX audio stream ended unexpectedly'
     raise AiError(_err)
+
+
+async def read_stream_chunk(
+    stream: asyncio.StreamReader,
+    wav_file: Path | None,
+) -> bytes:
+    if wav_file is None:
+        return await stream.read(STT_CHUNK_BYTES)
+    try:
+        return await stream.readexactly(WAV_INPUT_CHUNK_BYTES)
+    except asyncio.IncompleteReadError as error:
+        return error.partial
 
 
 async def append_audio(websocket: WebSocket, chunk: bytes) -> bool:
@@ -638,15 +686,21 @@ async def append_audio(websocket: WebSocket, chunk: bytes) -> bool:
     return True
 
 
-async def run_microphone_session(
+async def run_realtime_session(
     websocket: WebSocket,
-    recorder: asyncio.subprocess.Process,
+    audio_input: asyncio.subprocess.Process,
     handler: RealtimeEventHandler,
     stop: asyncio.Event,
+    wav_file: Path | None,
 ) -> str | None:
     receiver = asyncio.create_task(receive_realtime_events(websocket, handler, stop))
     try:
-        await send_microphone_audio(websocket, recorder, stop)
+        await send_input_audio(
+            websocket,
+            audio_input,
+            stop,
+            wav_file,
+        )
         with contextlib.suppress(WebSocketClosedError):
             await websocket.send_text(json.dumps({'type': 'input_audio_buffer.commit'}))
         return await receiver
@@ -657,23 +711,25 @@ async def run_microphone_session(
 
 
 async def close_realtime(
-    recorder: asyncio.subprocess.Process | None,
+    audio_input: asyncio.subprocess.Process | None,
     websocket: WebSocket | None,
     handler: RealtimeEventHandler,
 ) -> None:
-    if recorder is not None:
-        await stop_process(recorder)
+    if audio_input is not None:
+        await stop_process(audio_input)
     if websocket is not None:
         await websocket.close()
     await handler.close()
 
 
-async def run_realtime(
+async def run_realtime(  # noqa: PLR0913
     url: str,
     provider: str,
     error_label: str,
     handler: RealtimeEventHandler,
     sox_command: str,
+    wav_file: Path | None,
+    voice: str | None = None,
 ) -> None:
     status = handler.status
     token = await asyncio.to_thread(auth_token, provider)
@@ -688,7 +744,7 @@ async def run_realtime(
     with contextlib.suppress(NotImplementedError):
         loop.add_signal_handler(signal.SIGINT, interrupt)
 
-    recorder: asyncio.subprocess.Process | None = None
+    audio_input: asyncio.subprocess.Process | None = None
     websocket: WebSocket | None = None
     server_error: str | None = None
     try:
@@ -700,40 +756,62 @@ async def run_realtime(
                     'session': {
                         'input_audio_sample_rate': audio_format.sample_rate,
                         'input_audio_channels': audio_format.channels,
-                    },
+                    }
+                    | ({'voice': voice} if voice else {}),
                 },
             ),
         )
-        recorder = await start_recorder(sox_command, audio_format)
-        status.recording_started()
-        server_error = await run_microphone_session(websocket, recorder, handler, stop)
+        audio_input = await start_audio_input(sox_command, audio_format, wav_file)
+        if wav_file is None:
+            status.recording_started()
+        else:
+            status.wav_started(wav_file)
+        server_error = await run_realtime_session(
+            websocket,
+            audio_input,
+            handler,
+            stop,
+            wav_file,
+        )
     finally:
         stop.set()
         status.recording_stopped()
-        await close_realtime(recorder, websocket, handler)
+        await close_realtime(audio_input, websocket, handler)
 
     if server_error is not None:
         _err = f'{error_label} server error: {server_error}'
         raise AiError(_err)
 
 
-async def run_stt() -> None:
+async def run_stt(
+    wav_file: Path | None,
+    *,
+    url: str,
+    provider: str,
+) -> None:
     status = ModeStatus('stt')
     await run_realtime(
-        STT_URL,
-        STT_PROVIDER,
+        url,
+        provider,
         'STT',
         SttEventHandler(status),
         require_command('sox'),
+        wav_file,
     )
 
 
-async def run_assist() -> None:
+async def run_assist(
+    wav_file: Path | None,
+    *,
+    url: str,
+    provider: str,
+    voice: str | None,
+) -> None:
     sox_command = require_command('sox')
     status = ModeStatus('assist')
     await run_realtime(
-        ASSIST_URL,
-        ASSIST_PROVIDER,
+        url,
+        provider,
         'assistant',
         AssistEventHandler(
             PcmPlayer(
@@ -743,6 +821,8 @@ async def run_assist() -> None:
             status,
         ),
         sox_command,
+        wav_file,
+        voice,
     )
 
 
@@ -758,19 +838,17 @@ def tts_audio_format(response: http.client.HTTPResponse) -> PcmFormat:
     return PcmFormat(int(sample_rate), PCM_SAMPLE_WIDTH, int(channels))
 
 
-async def run_tts(text: str, voice: str | None) -> None:
-    status = ModeStatus('tts')
+async def play_tts_request(
+    body: dict[str, Any],
+    *,
+    mode: str,
+    url: str,
+    provider: str,
+) -> None:
+    status = ModeStatus(mode)
     sox_command = require_command('sox')
-    token = await asyncio.to_thread(auth_token, TTS_PROVIDER)
-    body: dict[str, Any] = {
-        'model': TTS_MODEL,
-        'input': text,
-        'response_format': 'pcm',
-    }
-    if voice is not None:
-        body['voice'] = voice
-
-    response = await asyncio.to_thread(open_request, json_request(TTS_URL, token, body))
+    token = await asyncio.to_thread(auth_token, provider)
+    response = await asyncio.to_thread(open_request, json_request(url, token, body))
     player = PcmPlayer(
         sox_command,
         lambda: status.first_output('first spoken sound'),
@@ -784,19 +862,73 @@ async def run_tts(text: str, voice: str | None) -> None:
         await player.close()
 
 
-def run_llm(user_prompt: str, system_prompt: str | None) -> None:
+async def run_tts(
+    text: str,
+    voice: str | None,
+    *,
+    url: str,
+    provider: str,
+    model: str,
+) -> None:
+    body: dict[str, Any] = {
+        'model': model,
+        'input': text,
+        'response_format': 'pcm',
+    }
+    if voice is not None:
+        body['voice'] = voice
+    await play_tts_request(
+        body,
+        mode='tts',
+        url=url,
+        provider=provider,
+    )
+
+
+async def run_tts_multi(
+    speakers: dict[str, str],
+    segments: list[tuple[str, str]],
+    *,
+    url: str,
+    provider: str,
+    model: str,
+) -> None:
+    body: dict[str, Any] = {
+        'model': model,
+        'input': {
+            'speakers': {name: {'voice': voice} for name, voice in speakers.items()},
+            'segments': [{'speaker': speaker, 'text': text} for speaker, text in segments],
+        },
+        'response_format': 'pcm',
+    }
+    await play_tts_request(
+        body,
+        mode='tts-multi',
+        url=url,
+        provider=provider,
+    )
+
+
+def run_llm(
+    user_prompt: str,
+    system_prompt: str | None,
+    *,
+    url: str,
+    provider: str,
+    model: str,
+) -> None:
     status = ModeStatus('llm')
-    token = auth_token(LLM_PROVIDER)
+    token = auth_token(provider)
     messages: list[dict[str, str]] = []
     if system_prompt is not None:
         messages.append({'role': 'system', 'content': system_prompt})
     messages.append({'role': 'user', 'content': user_prompt})
 
     request = json_request(
-        LLM_URL,
+        url,
         token,
         {
-            'model': LLM_MODEL,
+            'model': model,
             'messages': messages,
             'stream': False,
         },
@@ -816,59 +948,307 @@ def run_llm(user_prompt: str, system_prompt: str | None) -> None:
     print(content)
 
 
-def run_realtime_mode(
-    mode: str,
-    arguments: list[str],
-    runner: Callable[[], Awaitable[None]],
+def existing_wav_file(value: str) -> Path:
+    path = Path(value).expanduser().resolve()
+    if not path.exists():
+        _err = f'WAV file not found: {path}'
+        raise argparse.ArgumentTypeError(_err)
+    if not path.is_file():
+        _err = f'WAV input is not a file: {path}'
+        raise argparse.ArgumentTypeError(_err)
+    return path
+
+
+def add_service_options(
+    parser: argparse.ArgumentParser,
+    *,
+    default_url: str,
+    url_environment: str,
+    default_provider: str,
 ) -> None:
-    if arguments:
-        _err = f'{mode} accepts no arguments\n{usage()}'
+    parser.add_argument(
+        '--url',
+        default=default_url,
+        metavar='URL',
+        help=(f'service endpoint (default: %(default)s; environment: ${url_environment})'),
+    )
+    parser.add_argument(
+        '--provider',
+        default=default_provider,
+        metavar='NAME',
+        help='ak-auth-provider application name (default: %(default)s)',
+    )
+
+
+def add_wav_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        '--wav',
+        type=existing_wav_file,
+        metavar='FILE',
+        help='replay FILE instead of recording from the microphone',
+    )
+
+
+def add_voice_option(parser: argparse.ArgumentParser) -> None:
+    default = os.environ.get('AI_VOICE')
+    parser.add_argument(
+        '--voice',
+        default=default,
+        metavar='NAME',
+        help=f'voice name (default: {default or "server default"}; environment: $AI_VOICE)',
+    )
+
+
+def speaker_assignment(value: str) -> tuple[str, str]:
+    name, separator, voice = value.partition('=')
+    name = name.strip()
+    voice = voice.strip()
+    if not separator or not name or not voice:
+        _err = 'speaker must use NAME=VOICE'
+        raise argparse.ArgumentTypeError(_err)
+    return name, voice
+
+
+def speaker_definitions(
+    assignments: list[tuple[str, str]],
+) -> tuple[dict[str, str], dict[str, list[str]]]:
+    speakers: dict[str, str] = {}
+    voice_speakers: dict[str, list[str]] = {}
+    for name, voice in assignments:
+        if name in speakers:
+            _err = f'duplicate speaker name: {name}'
+            raise AiError(_err)
+        speakers[name] = voice
+        voice_speakers.setdefault(voice, []).append(name)
+    return speakers, voice_speakers
+
+
+def resolve_speaker_reference(
+    reference: str,
+    speakers: dict[str, str],
+    voice_speakers: dict[str, list[str]],
+) -> str:
+    if reference in speakers:
+        return reference
+    candidates = voice_speakers.get(reference, [])
+    if not candidates:
+        _err = f'unknown segment speaker or voice: {reference}'
         raise AiError(_err)
-    asyncio.run(runner())
-
-
-def run_assist_mode(arguments: list[str]) -> None:
-    run_realtime_mode('assist', arguments, run_assist)
-
-
-def run_stt_mode(arguments: list[str]) -> None:
-    run_realtime_mode('stt', arguments, run_stt)
-
-
-def run_tts_mode(arguments: list[str]) -> None:
-    if len(arguments) not in (1, 2):
-        raise AiError('tts requires text and accepts an optional voice\n' + usage())
-    text, *voices = arguments
-    voice = voices[0] if voices else None
-    asyncio.run(run_tts(text, voice))
-
-
-def run_llm_mode(arguments: list[str]) -> None:
-    if len(arguments) not in (1, 2):
-        raise AiError(
-            'llm requires a user prompt and accepts an optional system prompt\n' + usage(),
-        )
-    user_prompt, *system_prompts = arguments
-    system_prompt = system_prompts[0] if system_prompts else None
-    run_llm(user_prompt, system_prompt)
-
-
-def main() -> None:
-    command_line = sys.argv[1:]
-    if not command_line:
-        raise AiError(usage())
-    mode, *arguments = command_line
-    handlers: dict[str, Callable[[list[str]], None]] = {
-        'assist': run_assist_mode,
-        'stt': run_stt_mode,
-        'tts': run_tts_mode,
-        'llm': run_llm_mode,
-    }
-    handler = handlers.get(mode)
-    if handler is None:
-        _err = f'unknown mode: {mode}\n{usage()}'
+    if len(candidates) > 1:
+        names = ', '.join(candidates)
+        _err = f'voice {reference} maps to multiple speakers ({names}); use a speaker name'
         raise AiError(_err)
-    handler(arguments)
+    return candidates[0]
+
+
+def multi_speaker_arguments(
+    assignments: list[tuple[str, str]],
+    segment_values: list[str],
+) -> tuple[dict[str, str], list[tuple[str, str]]]:
+    speakers, voice_speakers = speaker_definitions(assignments)
+    if len(segment_values) % 2:
+        _err = 'segments must be provided as SPEAKER TEXT pairs'
+        raise AiError(_err)
+
+    segments: list[tuple[str, str]] = []
+    pairs = zip(segment_values[::2], segment_values[1::2], strict=True)
+    for reference, text in pairs:
+        speaker = resolve_speaker_reference(reference, speakers, voice_speakers)
+        segments.append((speaker, text))
+    return speakers, segments
+
+
+def run_assist_mode(options: argparse.Namespace) -> None:
+    asyncio.run(
+        run_assist(
+            options.wav,
+            url=options.url,
+            provider=options.provider,
+            voice=options.voice,
+        ),
+    )
+
+
+def run_stt_mode(options: argparse.Namespace) -> None:
+    asyncio.run(
+        run_stt(
+            options.wav,
+            url=options.url,
+            provider=options.provider,
+        ),
+    )
+
+
+def run_tts_mode(options: argparse.Namespace) -> None:
+    asyncio.run(
+        run_tts(
+            options.text,
+            options.voice,
+            url=options.url,
+            provider=options.provider,
+            model=options.model,
+        ),
+    )
+
+
+def run_tts_multi_mode(options: argparse.Namespace) -> None:
+    speakers, segments = multi_speaker_arguments(
+        options.speakers,
+        options.segments,
+    )
+    asyncio.run(
+        run_tts_multi(
+            speakers,
+            segments,
+            url=options.url,
+            provider=options.provider,
+            model=options.model,
+        ),
+    )
+
+
+def run_llm_mode(options: argparse.Namespace) -> None:
+    run_llm(
+        options.prompt,
+        options.system,
+        url=options.url,
+        provider=options.provider,
+        model=options.model,
+    )
+
+
+def argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description='Use speech, assistant, and language-model services.',
+    )
+    subparsers = parser.add_subparsers(
+        dest='command',
+        required=True,
+        title='commands',
+    )
+
+    assist_parser = subparsers.add_parser(
+        'assist',
+        help='record or replay speech and play the assistant response',
+        description='Record or replay speech and play the assistant response.',
+    )
+    add_wav_option(assist_parser)
+    add_voice_option(assist_parser)
+    add_service_options(
+        assist_parser,
+        default_url=DEFAULT_ASSIST_URL,
+        url_environment='AI_ASSIST_URL',
+        default_provider=DEFAULT_ASSIST_PROVIDER,
+    )
+    assist_parser.set_defaults(handler=run_assist_mode)
+
+    stt_parser = subparsers.add_parser(
+        'stt',
+        help='transcribe microphone or WAV audio',
+        description='Transcribe microphone or WAV audio.',
+    )
+    add_wav_option(stt_parser)
+    add_service_options(
+        stt_parser,
+        default_url=DEFAULT_STT_URL,
+        url_environment='AI_STT_URL',
+        default_provider=DEFAULT_STT_PROVIDER,
+    )
+    stt_parser.set_defaults(handler=run_stt_mode)
+
+    tts_parser = subparsers.add_parser(
+        'tts',
+        help='synthesize and play text as speech',
+        description='Synthesize and play text as speech.',
+    )
+    add_voice_option(tts_parser)
+    tts_parser.add_argument('text', metavar='TEXT', help='text to speak')
+
+    tts_parser.add_argument(
+        '--model',
+        default=DEFAULT_TTS_MODEL,
+        metavar='MODEL',
+        help='model name (default: %(default)s)',
+    )
+    add_service_options(
+        tts_parser,
+        default_url=DEFAULT_TTS_URL,
+        url_environment='AI_TTS_URL',
+        default_provider=DEFAULT_TTS_PROVIDER,
+    )
+    tts_parser.set_defaults(handler=run_tts_mode)
+
+    tts_multi_parser = subparsers.add_parser(
+        'tts-multi',
+        help='synthesize and play a sequence with multiple speakers',
+        description='Synthesize and play a sequence with multiple speakers.',
+        epilog=(
+            'example: ai tts-multi --speaker narrator=attenborough '
+            '--speaker bandit=bender bandit "Bite my shiny" '
+            'attenborough "... metal ass"'
+        ),
+    )
+    tts_multi_parser.add_argument(
+        '--speaker',
+        dest='speakers',
+        action='append',
+        required=True,
+        type=speaker_assignment,
+        metavar='NAME=VOICE',
+        help='declare a speaker and voice; repeat for each speaker',
+    )
+    tts_multi_parser.add_argument(
+        'segments',
+        nargs='+',
+        metavar='SPEAKER/TEXT',
+        help=('alternating SPEAKER TEXT pairs; SPEAKER may be a declared name or unique voice'),
+    )
+    tts_multi_parser.add_argument(
+        '--model',
+        default=DEFAULT_TTS_MODEL,
+        metavar='MODEL',
+        help='model name (default: %(default)s)',
+    )
+    add_service_options(
+        tts_multi_parser,
+        default_url=DEFAULT_TTS_MULTI_URL,
+        url_environment='AI_TTS_MULTI_URL',
+        default_provider=DEFAULT_TTS_PROVIDER,
+    )
+    tts_multi_parser.set_defaults(handler=run_tts_multi_mode)
+
+    llm_parser = subparsers.add_parser(
+        'llm',
+        help='send a prompt to a chat-completion model',
+        description='Send a prompt to a chat-completion model.',
+    )
+    llm_parser.add_argument('prompt', metavar='PROMPT', help='user prompt')
+    llm_parser.add_argument(
+        '--system',
+        metavar='TEXT',
+        help='system prompt',
+    )
+    llm_parser.add_argument(
+        '--model',
+        default=DEFAULT_LLM_MODEL,
+        metavar='MODEL',
+        help='model name (default: %(default)s)',
+    )
+    add_service_options(
+        llm_parser,
+        default_url=DEFAULT_LLM_URL,
+        url_environment='AI_LLM_URL',
+        default_provider=DEFAULT_LLM_PROVIDER,
+    )
+    llm_parser.set_defaults(handler=run_llm_mode)
+
+    return parser
+
+
+def main(arguments: list[str] | None = None) -> None:
+    options = argument_parser().parse_args(arguments)
+    handler: Callable[[argparse.Namespace], None] = options.handler
+    handler(options)
 
 
 if __name__ == '__main__':
