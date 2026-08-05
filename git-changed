@@ -173,7 +173,7 @@ _ = parser.add_argument(
     '-i',
     '--ignore-files',
     action='append',
-    help='Ignore files listed in the .git-changed-ignore file.',
+    help='Ignore files for change detection',
 )
 
 _ = parser.add_argument(
