@@ -1,0 +1,22 @@
+#!/bin/bash
+
+MODEL="${1:-Qwen2.5-Coder-3B-Q4_K_M.gguf}"
+
+PIDFILE="/tmp/nvim-agent.pid"
+
+if [ -f "${PIDFILE}" ]; then
+    PID="$(cat "${PIDFILE}")"
+    if kill -0 "${PID}"; then
+        echo "Already running at ${PID}" >/dev/stderr
+        exit 0
+    else
+        echo "Removing stale pidfile" >/dev/stderr
+        rm "${PIDFILE}"
+    fi
+fi
+
+trap 'rm -f "${PIDFILE}"' EXIT
+
+llama-server -m "${HOME}/.models/${MODEL}" &
+echo $! >$PIDFILE
+wait
