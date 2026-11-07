@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -eEuo pipefail
+
+ROOT="$PWD"
+NAME="claude-$(basename "$ROOT")"
+SIDE="$HOME/.cache/agents/$(printf %s "$ROOT" | sha256sum | cut -c1-12)"
+mkdir -p "$SIDE"
+
+SBX_ARGS=()
+for ((i = 1; i <= $#; i++)); do
+    if [[ ${!i} == -- ]]; then
+        SBX_ARGS=("${@:1:i-1}")
+        shift "$i"
+        break
+    fi
+done
+
+echo "{\"cwd\":\"$ROOT\",\"session_id\":null}" |
+    "$HOME/.config/agents/hooks/inject-contract" "$SIDE/contract.md"
+
+if sbx inspect "$NAME" >/dev/null 2>&1; then
+    exec sbx run --name "$NAME" ${SBX_ARGS[@]+"${SBX_ARGS[@]}"} \
+        -- --append-system-prompt-file "$SIDE/contract.md" "$@"
+else
+    exec sbx run claude --name "$NAME" ${SBX_ARGS[@]+"${SBX_ARGS[@]}"} "$ROOT" "$SIDE:ro" \
+        -- --append-system-prompt-file "$SIDE/contract.md" "$@"
+fi
